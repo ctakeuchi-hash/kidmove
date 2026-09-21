@@ -36,6 +36,7 @@ const CONFIG = {
   game: '',            // '' = menu, 'trace' or 'jump' = start playing
   set: '',             // upper | lower | digits | hiragana | katakana
   players: 1,          // 1 or 2 (two players trace the same character together)
+  smooth: 1,           // tracking smoothing: 0 = off, 1 = default, 2 = smoother (more lag), 0.5 = lighter
   dwellMs: 1000,       // hold your hand on a menu button this long to press it
   mouse: 0,            // 1 = use the mouse as the wrist (test without a phone)
   group: '',           // practice a subset of the current set, e.g. 'vowels', 'consonants', 'row0'.. ('' = all)
@@ -128,21 +129,41 @@ function nearestAlong(st, x, y, R, lo, hi) {
 }
 
 
+// ---- Smoothing: a "One Euro" filter per landmark. Steady limbs get heavy smoothing (no jitter); fast movement gets almost none (no lag). ----
+class OneEuro {
+  constructor(minC, beta) { this.minC = minC; this.beta = beta; this.x = null; this.dx = 0 }
+  static a(cutoff, dt) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt) }
+  f(v, dt) {
+    if (!CONFIG.smooth) return v
+    if (this.x === null) { this.x = v; return v }
+    this.dx += OneEuro.a(1, dt) * ((v - this.x) / dt - this.dx)
+    this.x += OneEuro.a((this.minC + this.beta * Math.abs(this.dx)) / CONFIG.smooth, dt) * (v - this.x)
+    return this.x
+  }
+}
+// b indexes: 0 nose, 1-2 shoulders, 3-4 elbows, 5-6 wrists, 7-8 hips, 9-12 knees/ankles. Hands move a lot, the trunk barely does.
+const makeFilters = () => Array.from({ length: 13 }, (_, i) => [3, 4, 5, 6].includes(i) ? [new OneEuro(1.6, 10), new OneEuro(1.6, 10)] : [new OneEuro(0.6, 2), new OneEuro(0.6, 2)])
+
 // ---- Input: dominant wrist = the one that has moved most in the last second ----
-function motion(h) { let s = 0; for (let i = 1; i < h.length; i++) s += Math.hypot(h[i].x - h[i - 1].x, h[i].y - h[i - 1].y); return s }
+// How far a hand has ranged over the last second (bounding-box diagonal). Jitter at rest is a few px; real movement is hundreds.
+function motion(h) {
+  if (h.length < 2) return 0
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9
+  for (const q of h) { x0 = Math.min(x0, q.x); x1 = Math.max(x1, q.x); y0 = Math.min(y0, q.y); y1 = Math.max(y1, q.y) }
+  return Math.hypot(x1 - x0, y1 - y0)
+}
 
 function onWrists(pl, w) { // w = [[x,y]|null, [x,y]|null] in canvas px
   const now = performance.now()
   w.forEach((p, i) => {
     if (!p) return
-    const h = pl.hist[i], l = h[h.length - 1]
-    // light smoothing to kill camera jitter without adding noticeable lag
-    const q = l ? { x: l.x * 0.4 + p[0] * 0.6, y: l.y * 0.4 + p[1] * 0.6 } : { x: p[0], y: p[1] }
-    h.push({ t: now, ...q })
+    const h = pl.hist[i]
+    h.push({ t: now, x: p[0], y: p[1] })
     while (h[0].t < now - 1000) h.shift()
   })
   const [a, b] = [motion(pl.hist[0]), motion(pl.hist[1])]
-  const next = pl.dom === 0 ? (b > a * 1.3 ? 1 : 0) : (a > b * 1.3 ? 0 : 1) // hysteresis: don't flicker between hands
+  // the other hand only takes over if it is clearly moving more (1.5x and at least 40px of travel, above resting wobble), so the dot never hops between hands
+  const next = pl.dom === 0 ? (b > a * 1.5 && b > 40 ? 1 : 0) : (a > b * 1.5 && a > 40 ? 0 : 1)
   const switched = next !== pl.dom; pl.dom = next
   const h = pl.hist[pl.dom], p = h[h.length - 1]
   if (!p || won || pl.done) return
@@ -555,7 +576,7 @@ function layoutBody(pl, b, ar) {
   const s = useBody ? CONFIG.reach * H / pl.torso : 0, ax = anchorX(pl.i)
   const pts = b.map(([x, y], i) => {
     const t = useBody ? { x: ax + (sx - x) * ar * s, y: H * 0.6 + (y - sy) * s } : { x: (1 - x) * W, y: y * H }
-    const o = pl.body && pl.body.pts[i]; return o ? { x: o.x * 0.4 + t.x * 0.6, y: o.y * 0.4 + t.y * 0.6 } : t // light smoothing
+    return t
   })
   return { pts, kind: useBody ? 'body' : 'camera' }
 }
@@ -614,10 +635,15 @@ function onPose(m) {
   else if (scr.length >= 2) { scr.sort((a, b) => a.x - b.x); slots = [{ p: scr[0].p, i: 0 }, { p: scr[1].p, i: 1 }] }
   else slots = [{ p: scr[0].p, i: scr[0].x < 0.5 ? 0 : 1 }]
   for (const { p, i } of slots) {
-    const pl = PL[i]; pl.lastPoseAt = now
-    pl.body = layoutBody(pl, p.b, ar)
+    const pl = PL[i], gap = now - pl.lastPoseAt > 500; pl.lastPoseAt = now
+    if (gap || !pl.filt) pl.filt = makeFilters() // don't smooth across a lost-tracking gap
+    const dt = pl.lastT && m.t ? Math.min(0.2, Math.max(1 / 120, (m.t - pl.lastT) / 1000)) : 1 / 30; pl.lastT = gap ? 0 : (m.t || 0)
+    const fb = p.b.map(([x, y], j) => [pl.filt[j][0].f(x, dt), pl.filt[j][1].f(y, dt)])
+    pl.body = layoutBody(pl, fb, ar)
     const wristPx = [pl.body.pts[5], pl.body.pts[6]].map((q) => [q.x, q.y])
-    const hi = wristPx[0][1] < wristPx[1][1] ? 0 : 1; pl.gaze = { x: wristPx[hi][0], y: wristPx[hi][1] } // eyes follow the raised hand
+    // the "raised" hand (for the menu pointer and the bear's eyes) is sticky: the other hand must be clearly higher to take over
+    if (pl.hi === undefined || Math.abs(wristPx[0][1] - wristPx[1][1]) > 60) pl.hi = wristPx[0][1] < wristPx[1][1] ? 0 : 1
+    const hi = pl.hi; pl.gaze = { x: wristPx[hi][0], y: wristPx[hi][1] }
     if (i === 0) { mascotGaze.x = pl.gaze.x; mascotGaze.y = pl.gaze.y }
     if (Math.min(p.k[0][2] ?? 0, p.k[1][2] ?? 0) < CONFIG.closeZ) { // hand reaching toward the camera
       if (i === 0 && now > closeUntil + 1500) { sfx.boop(); pop('Whoa!', W - 150, H - 200) }
@@ -625,7 +651,7 @@ function onPose(m) {
     }
     if (scene === 'menu' || scene === 'sets' || scene === 'groups') pl.ptr = { x: wristPx[hi][0], y: wristPx[hi][1], t: now }
     else if (mode === 'trace') onWrists(pl, wristPx)
-    else if (i === 0) onHips(p.k)
+    else if (i === 0) onHips([null, null, fb[7], fb[8]]) // smoothed hips
   }
 }
 

@@ -43,7 +43,7 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 
 | What | How |
 |---|---|
-| Pick a set / game | `1`-`5` sets, `6` Jump, `Esc` menu, `P` 1/2 players |
+| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `Esc` menu, `P` 1/2 players |
 | How much of each stroke is needed | `↑`/`↓` or `?threshold=0.7` |
 | How far your hand may stray from the line | `?brush=0.12` (bigger = more forgiving) |
 | Prev / next character | `←` / `→` (or the ⏭ button) |
@@ -54,6 +54,7 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 | Start straight in a game | `?set=hiragana&players=2`, `?game=jump` |
 | Practice a subset | groups screen (after picking a set), voice, or `?group=vowels` / `?group=consonants` / `?group=row0`.."row9" |
 | Randomize character order | groups screen's 🔀 Shuffle tile, voice ("shuffle the letters"), or `?shuffle=1` |
+| Jumpy tracking | `?smooth=2` (steadier, a little more lag); `?smooth=0` turns smoothing off. On the phone page: `?model=full` (steadier pose model, a bit slower) |
 | Mute | `M` |
 | Test without a phone | `?mouse=1` (mouse = wrist), `Space` = fake jump |
 

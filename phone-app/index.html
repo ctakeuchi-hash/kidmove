@@ -34,6 +34,8 @@ import { PoseLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@m
 fetch('/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => document.getElementById('ver').textContent = 'v' + v.version).catch(() => {})
 const log = (s) => document.getElementById('log').textContent = s
 const video = document.getElementById('v')
+// Pose model: lite (fastest, default), full (steadier tracking, a bit slower), heavy (steadiest, slowest): phone URL ?model=full
+const MODEL = ['lite', 'full', 'heavy'].includes(new URLSearchParams(location.search).get('model')) ? new URLSearchParams(location.search).get('model') : 'lite'
 const KEYS = [15, 16, 23, 24] // L wrist, R wrist, L hip, R hip
 // Full upper/lower body for the TV avatar: nose, shoulders, elbows, wrists, hips, knees, ankles
 const BODY = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
@@ -50,7 +52,7 @@ await video.play()
 const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm')
 const pose = await PoseLandmarker.createFromOptions(fileset, {
   baseOptions: {
-    modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task',
+    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_${MODEL}/float16/latest/pose_landmarker_${MODEL}.task`,
     delegate: 'GPU' },
   runningMode: 'VIDEO', numPoses: 1 })
 
