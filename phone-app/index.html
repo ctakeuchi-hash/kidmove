@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone — Kids Motion Game</title>
+<style>body{font:16px system-ui;padding:2rem;text-align:center}button{font-size:1.5rem;padding:1rem 2rem}</style>
+<h1>Phone (capture)</h1>
+<p>ws: <b id="status">connecting…</b></p>
+<button id="ping">Send test frame</button>
+<script type="module">
+const ws = new WebSocket(`ws://${location.host}`)
+const status = document.getElementById('status')
+ws.onopen = () => status.textContent = 'connected'
+ws.onclose = () => status.textContent = 'disconnected'
+document.getElementById('ping').onclick = () =>
+  ws.send(JSON.stringify({ type: 'test', t: Date.now() }))
+</script>

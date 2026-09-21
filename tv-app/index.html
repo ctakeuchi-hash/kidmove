@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TV — Kids Motion Game</title>
+<style>body{font:16px system-ui;background:#111;color:#eee;margin:0;height:100vh;display:grid;place-items:center;text-align:center}</style>
+<div>
+  <h1>TV (display)</h1>
+  <p>ws: <b id="status">connecting…</b></p>
+  <pre id="last">no messages yet</pre>
+</div>
+<script type="module">
+const ws = new WebSocket(`ws://${location.host}`)
+const status = document.getElementById('status')
+ws.onopen = () => status.textContent = 'connected'
+ws.onclose = () => status.textContent = 'disconnected'
+ws.onmessage = (e) => document.getElementById('last').textContent = e.data
+</script>

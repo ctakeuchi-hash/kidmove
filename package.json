@@ -1,0 +1,8 @@
+{
+  "name": "kids-motion-game",
+  "private": true,
+  "workspaces": ["server", "phone-app", "tv-app"],
+  "scripts": {
+    "dev": "npm run dev -w server"
+  }
+}
