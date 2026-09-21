@@ -5,21 +5,29 @@
 <style>
   html,body{margin:0;height:100%;background:#0b0b1a;overflow:hidden}
   canvas{display:block;width:100vw;height:100vh}
+  #menu{position:fixed;top:10px;right:12px;display:flex;gap:8px}
+  #menu button{font:600 18px system-ui;padding:8px 16px;border-radius:20px;border:2px solid #fff6;background:#0006;color:#fff;cursor:pointer}
+  #menu button.on{background:#fff;color:#111}
   pre{position:fixed;top:8px;left:12px;margin:0;color:#6f6;font:16px monospace;opacity:.7}
 </style>
 <canvas id="c"></canvas>
+<div id="menu"><button data-g="letters">✏️ Letters (1)</button><button data-g="jump">🦘 Jump (2)</button></div>
 <pre id="hud">connecting…</pre>
 <script>
 // ---- Config: override any of these via URL, e.g. /tv/?threshold=0.6&brush=0.12&mouse=1 ----
-// Live tuning: ArrowUp/ArrowDown = threshold ±5%, ArrowRight/Left = next/prev letter.
+// Live tuning: ArrowUp/Down = threshold ±5% (Jump: jump size ±0.01), ArrowRight/Left = next/prev letter.
+// Modes: keys 1 / 2, the buttons top-right, the phone's buttons, or voice ("play jump dodge"). Space = fake jump (testing).
 const CONFIG = {
   threshold: 0.7,   // fraction of the letter that must be covered to pass
   brush: 0.09,      // brush radius as a fraction of letter height (bigger = more forgiving)
   letters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
   pauseMs: 2500,    // celebration time before next letter
+  jumpThreshold: 0.05, // Jump Dodge: hip rise (fraction of camera height) that counts as a jump
+  jumpSpeed: 0.3,      // Jump Dodge: obstacle speed, screen widths per second
+  game: 'letters',     // start mode: letters | jump
   mouse: 0,         // 1 = use the mouse as the wrist (test without a phone)
 }
-for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = k === 'letters' ? v : +v
+for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = k === 'letters' || k === 'game' ? v : +v
 
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), hud = document.getElementById('hud')
 let W, H, size
@@ -89,12 +97,15 @@ function tone(f, t0, dur) {
   g.gain.setValueAtTime(0.25, actx.currentTime + t0); g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + t0 + dur)
   o.connect(g).connect(actx.destination); o.start(actx.currentTime + t0); o.stop(actx.currentTime + t0 + dur)
 }
+function celebrate(n) { // confetti + chime, shared by both games
+  for (let i = 0; i < n; i++) confetti.push({ x: W / 2, y: H / 2, vx: (Math.random() - .5) * 26, vy: -Math.random() * 22 - 4,
+    r: Math.random() * 6.28, vr: (Math.random() - .5) * .4, c: `hsl(${Math.random() * 360} 90% 60%)`, s: 8 + Math.random() * 10 })
+  try { [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.12, 0.4)) } catch {}
+}
 function win() {
   won = true
   for (const s of samples) s.on = true // letter fills with colour
-  for (let i = 0; i < 180; i++) confetti.push({ x: W / 2, y: H / 2, vx: (Math.random() - .5) * 26, vy: -Math.random() * 22 - 4,
-    r: Math.random() * 6.28, vr: (Math.random() - .5) * .4, c: `hsl(${Math.random() * 360} 90% 60%)`, s: 8 + Math.random() * 10 })
-  try { [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.12, 0.4)) } catch {}
+  celebrate(180)
   winTimer = setTimeout(() => loadLetter(idx + 1), CONFIG.pauseMs)
 }
 // Browsers block audio until a user gesture; one click/key on the TV page unlocks it.
@@ -103,10 +114,14 @@ addEventListener('pointerdown', unlock); addEventListener('keydown', unlock)
 
 // ---- Voice commands (structured, from the server) ----
 const LEVELS = { easy: [0.5, 0.12], medium: [0.7, 0.09], hard: [0.85, 0.07] } // [threshold, brush]
+const JUMP_LEVELS = { easy: [0.04, 0.22], medium: [0.05, 0.3], hard: [0.06, 0.42] } // [jumpThreshold, jumpSpeed]
 function runCommand(name, input = {}) {
-  if (name === 'restart_game') loadLetter(0)
-  else if (name === 'next_letter') loadLetter(idx + 1)
-  else if (name === 'set_difficulty' && LEVELS[input.level]) [CONFIG.threshold, CONFIG.brush] = LEVELS[input.level]
+  if (name === 'switch_game') setMode(input.name)
+  else if (name === 'restart_game') mode === 'jump' ? jumpReset() : loadLetter(0)
+  else if (name === 'next_letter') mode === 'letters' && loadLetter(idx + 1)
+  else if (name === 'set_difficulty' && LEVELS[input.level]) {
+    [CONFIG.threshold, CONFIG.brush] = LEVELS[input.level]; [CONFIG.jumpThreshold, CONFIG.jumpSpeed] = JUMP_LEVELS[input.level]
+  }
   else console.warn('unknown command', name, input)
 }
 
@@ -147,9 +162,85 @@ function drawBanner(now) {
   ctx.restore()
 }
 
+// ---- Modes: both games read the same pose stream via onPose() ----
+let mode = ['letters', 'jump'].includes(CONFIG.game) ? CONFIG.game : 'letters'
+function setMode(name) {
+  if (!['letters', 'jump'].includes(name) || name === mode) return
+  clearTimeout(winTimer); confetti.length = 0; mode = name
+  if (mode === 'letters') loadLetter(idx); else jumpReset()
+  syncMenu(); notice = { text: mode === 'jump' ? 'Jump Dodge! Jump over the spikes' : 'Sky-Writing! Trace the letter', until: performance.now() + 2500 }
+}
+const syncMenu = () => document.querySelectorAll('#menu button').forEach((b) => b.classList.toggle('on', b.dataset.g === mode))
+document.querySelectorAll('#menu button').forEach((b) => b.onclick = () => setMode(b.dataset.g))
+function onPose(k, wristPx) { // k = [L wrist, R wrist, L hip, R hip], normalised
+  if (mode === 'letters') onWrists(wristPx)
+  else onHips(k)
+}
+
+// ---- Game 2: Jump Dodge (hip height vs. a slowly-adapting standing baseline) ----
+const jump = { base: null, rise: 0, lastPose: 0, fakeAt: -1e9, obstacles: [], nextSpawn: 0, lives: 3, score: 0, hitUntil: 0, over: 0, t: 0 }
+function jumpReset() { Object.assign(jump, { obstacles: [], lives: 3, score: 0, hitUntil: 0, over: 0, nextSpawn: performance.now() + 1500, t: 0 }) }
+function onHips(k) {
+  const y = (k[2][1] + k[3][1]) / 2 // 0 = top of camera frame, so a jump makes y smaller
+  if (jump.base === null) jump.base = y
+  jump.rise = jump.base - y
+  // Baseline follows where you stand (camera distance/crouching), but not during a jump or it would chase you up.
+  if (jump.rise < CONFIG.jumpThreshold * 0.5) jump.base += (y - jump.base) * 0.02
+  jump.lastPose = performance.now()
+}
+function drawJump(now) {
+  const dt = jump.t ? Math.min(0.05, (now - jump.t) / 1000) : 0; jump.t = now
+  const ground = H * 0.8, obH = H * 0.11, obW = obH * 0.9, pw = obH * 0.7, px = W * 0.22, thr = CONFIG.jumpThreshold
+  const fake = (now - jump.fakeAt) / 600 // Space bar = scripted jump for testing without a camera
+  let rise = now - jump.lastPose > 400 ? 0 : Math.max(0, jump.rise) // lost tracking counts as standing still, not as a stuck jump
+  if (fake >= 0 && fake <= 1) rise = Math.max(rise, Math.sin(Math.PI * fake) * thr * 2)
+  const lift = Math.min(2.5, rise / thr) * obH // feet clear a spike exactly when rise >= threshold
+
+  if (!jump.over) {
+    if (now > jump.nextSpawn) {
+      jump.obstacles.push({ x: W + obW, hit: false, passed: false })
+      jump.nextSpawn = now + (0.45 + Math.random() * 0.35) / CONFIG.jumpSpeed * 1000 // gap of 0.45-0.8 screen widths
+    }
+    for (const o of jump.obstacles) {
+      o.x -= W * CONFIG.jumpSpeed * dt
+      const overlap = o.x < px + pw / 2 && o.x + obW > px - pw / 2
+      if (overlap && !o.hit && rise < thr && now > jump.hitUntil) {
+        o.hit = true; jump.hitUntil = now + 1000
+        if (--jump.lives <= 0) jump.over = now + 3000
+      } else if (!o.hit && !o.passed && o.x + obW < px - pw / 2) {
+        o.passed = true
+        if (++jump.score % 5 === 0) celebrate(80)
+      }
+    }
+    jump.obstacles = jump.obstacles.filter((o) => o.x > -obW * 2)
+  } else if (now > jump.over) jumpReset()
+
+  ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fillRect(0, ground, W, H - ground)
+  for (const o of jump.obstacles) {
+    ctx.fillStyle = o.hit ? '#888' : '#ff7b3d'
+    ctx.beginPath(); ctx.moveTo(o.x, ground); ctx.lineTo(o.x + obW / 2, ground - obH); ctx.lineTo(o.x + obW, ground); ctx.fill()
+  }
+  const blink = now < jump.hitUntil && Math.floor(now / 100) % 2
+  if (!blink) { // player: rounded body, tracks your real jump height
+    const top = ground - lift - pw * 1.4
+    ctx.fillStyle = '#4af'; ctx.beginPath(); ctx.roundRect(px - pw / 2, top, pw, pw * 1.4, pw * 0.3); ctx.fill()
+    ctx.fillStyle = '#fff'; for (const dx of [-0.2, 0.2]) { ctx.beginPath(); ctx.arc(px + pw * dx, top + pw * 0.4, pw * 0.13, 0, 7); ctx.fill() }
+  }
+  ctx.font = '600 34px system-ui'; ctx.textAlign = 'left'; ctx.fillStyle = '#fff'
+  ctx.fillText(`Score ${jump.score}   ${'♥'.repeat(Math.max(0, jump.lives))}`, 20, 64)
+  if (jump.over) { ctx.font = '900 96px system-ui'; ctx.textAlign = 'center'; ctx.fillText(`Game over! Score ${jump.score}`, W / 2, H * 0.42) }
+}
+
 // ---- Dev controls ----
 addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowRight') loadLetter(idx + 1)
+  if (e.key === '1') setMode('letters')
+  else if (e.key === '2') setMode('jump')
+  else if (e.key === ' ') jump.fakeAt = performance.now()
+  else if (mode === 'jump') {
+    if (e.key === 'ArrowUp') CONFIG.jumpThreshold += 0.01
+    else if (e.key === 'ArrowDown') CONFIG.jumpThreshold = Math.max(0.01, CONFIG.jumpThreshold - 0.01)
+  }
+  else if (e.key === 'ArrowRight') loadLetter(idx + 1)
   else if (e.key === 'ArrowLeft') loadLetter(idx - 1)
   else if (e.key === 'ArrowUp') CONFIG.threshold = Math.min(1, CONFIG.threshold + 0.05)
   else if (e.key === 'ArrowDown') CONFIG.threshold = Math.max(0.1, CONFIG.threshold - 0.05)
@@ -157,10 +248,7 @@ addEventListener('keydown', (e) => {
 if (CONFIG.mouse) addEventListener('mousemove', (e) => onWrists([[e.clientX, e.clientY], null]))
 
 // ---- Render ----
-function draw() {
-  const now = performance.now()
-  ctx.clearRect(0, 0, W, H)
-  drawBackground()
+function drawLetters(now) {
   ctx.font = FONT(); ctx.textAlign = 'center'
   ctx.fillStyle = `rgba(255,255,255,${bgImg ? 0.25 : 0.10})`; ctx.fillText(CONFIG.letters[idx], W / 2, glyphY) // ghost letter
   ctx.fillStyle = `hsl(${hue} 90% 60%)`
@@ -179,17 +267,23 @@ function draw() {
   if (head && !won) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(head.x, head.y, 20, 0, 7); ctx.fill() }
   ctx.shadowBlur = 0
 
-  for (const c of confetti) {
-    c.x += c.vx; c.y += c.vy; c.vy += 0.5; c.r += c.vr
-    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); ctx.fillStyle = c.c; ctx.fillRect(-c.s / 2, -c.s / 4, c.s, c.s / 2); ctx.restore()
-  }
-  while (confetti.length && confetti[0].y > H + 50) confetti.shift()
-
   // progress bar with threshold marker (for tuning)
   const pct = samples.length ? covered / samples.length : 0, bw = W * 0.5, bx = (W - bw) / 2, by = H - 28
   ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(bx, by, bw, 12)
   ctx.fillStyle = `hsl(${hue} 90% 60%)`; ctx.fillRect(bx, by, bw * pct, 12)
   ctx.fillStyle = '#fff'; ctx.fillRect(bx + bw * CONFIG.threshold - 2, by - 4, 4, 20)
+}
+
+function draw() {
+  const now = performance.now()
+  ctx.clearRect(0, 0, W, H)
+  drawBackground()
+  mode === 'letters' ? drawLetters(now) : drawJump(now)
+  for (const c of confetti) {
+    c.x += c.vx; c.y += c.vy; c.vy += 0.5; c.r += c.vr
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); ctx.fillStyle = c.c; ctx.fillRect(-c.s / 2, -c.s / 4, c.s, c.s / 2); ctx.restore()
+  }
+  while (confetti.length && confetti[0].y > H + 50) confetti.shift()
   drawBanner(now)
   requestAnimationFrame(draw)
 }
@@ -211,15 +305,17 @@ ws.onmessage = (e) => {
   else if (m.type === 'kp') {
     msgs++
     // k = [L wrist, R wrist, L hip, R hip], normalised; x mirrored so it acts like a mirror
-    onWrists([[(1 - m.k[0][0]) * W, m.k[0][1] * H], [(1 - m.k[1][0]) * W, m.k[1][1] * H]])
+    onPose(m.k, [[(1 - m.k[0][0]) * W, m.k[0][1] * H], [(1 - m.k[1][0]) * W, m.k[1][1] * H]])
     if (tvOff !== null && phoneOff !== null) { lat.push((Date.now() + tvOff) - (m.t + phoneOff)); if (lat.length > 60) lat.shift() }
   }
 }
 setInterval(() => {
   const now = performance.now(), fps = msgs / ((now - last) / 1000); msgs = 0; last = now
   const avg = lat.length ? (lat.reduce((a, b) => a + b) / lat.length).toFixed(0) + 'ms' : '…'
-  hud.textContent = `${CONFIG.letters[idx]}  ${(100 * covered / Math.max(1, samples.length)).toFixed(0)}% / ${(CONFIG.threshold * 100).toFixed(0)}%   latency ${avg}   ${fps.toFixed(0)}/s`
+  const info = mode === 'letters' ? `${CONFIG.letters[idx]}  ${(100 * covered / Math.max(1, samples.length)).toFixed(0)}% / ${(CONFIG.threshold * 100).toFixed(0)}%`
+    : `jump size ${CONFIG.jumpThreshold.toFixed(2)}  rise ${Math.max(0, jump.rise).toFixed(3)}`
+  hud.textContent = `${info}   latency ${avg}   ${fps.toFixed(0)}/s`
 }, 500)
 
-addEventListener('resize', resize); resize(); draw()
+addEventListener('resize', resize); resize(); syncMenu(); if (mode === 'jump') jumpReset(); draw()
 </script>

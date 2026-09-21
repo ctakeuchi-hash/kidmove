@@ -4,9 +4,11 @@
 <title>Phone — Kids Motion Game</title>
 <style>
   body{margin:0;font:14px system-ui;background:#000;color:#0f0}
+  button{font:600 18px system-ui;padding:10px 16px}
   video{width:100vw;transform:scaleX(-1)} pre{margin:8px}
 </style>
 <video id="v" playsinline muted></video>
+<div style="display:flex;gap:8px;padding:8px"><button data-g="letters">✏️ Letters</button><button data-g="jump">🦘 Jump</button></div>
 <pre id="log">starting…</pre>
 <pre id="voice">voice: starting…</pre>
 <script type="module">
@@ -58,6 +60,10 @@ ws.onmessage = (e) => {
   if (m.type === 'sync') { const off = m.s - (m.t0 + Date.now()) / 2; ws.send(JSON.stringify({ type: 'off', off })) }
 }
 setInterval(sync, 2000); sync()
+
+// Game menu: buttons send the same command voice does; the server relays phone messages to the TV unchanged.
+document.querySelectorAll('button[data-g]').forEach((b) => b.onclick = () =>
+  ws.send(JSON.stringify({ type: 'game_command', name: 'switch_game', input: { name: b.dataset.g } })))
 
 // Voice: continuous browser speech recognition; each finished phrase goes to the server as a voice_command.
 const voiceLog = document.getElementById('voice')
