@@ -279,7 +279,7 @@ const syncMenu = () => {
 }
 document.getElementById('snd').onclick = () => { if (actx && actx.state === 'running') { muted = !muted; syncMenu() } }
 document.querySelectorAll('#menu button[data-g]').forEach((b) => b.onclick = () => setMode(b.dataset.g))
-// ---- Body avatar. b = [nose, L/R shoulder, L/R elbow, L/R wrist, L/R hip, L/R knee, L/R ankle], normalised camera coords ----
+// ---- Body avatar (a cartoon bear). b = [nose, L/R shoulder, L/R elbow, L/R wrist, L/R hip, L/R knee, L/R ankle], normalised camera coords ----
 // 'body' mapping: your shoulders are pinned to a fixed spot on screen and everything is measured from them in torso lengths,
 // so it works for any height / distance from the phone, and ordinary arm movement covers the whole letter.
 // 'camera' mapping: raw mirrored camera position (used for Jump Dodge so you can see yourself jump).
@@ -298,20 +298,46 @@ function layoutBody(m) {
   })
   return { pts, kind: useBody ? 'body' : 'camera' }
 }
-function drawAvatar() {
+// Cartoon bear "Zip": follows your body; face copies the mascot's mood and its eyes watch your raised hand.
+const avCv = document.createElement('canvas')
+function drawAvatar(now) {
   if (!body) return
-  const P = body.pts, w = H * 0.06, col = 'hsl(205 80% 65%)'
-  ctx.save(); ctx.globalAlpha = mode === 'letters' ? 0.38 : 0.3
-  ctx.strokeStyle = ctx.fillStyle = col; ctx.lineWidth = w; ctx.lineCap = ctx.lineJoin = 'round'
-  const line = (...ix) => { ctx.beginPath(); ix.forEach((i, n) => n ? ctx.lineTo(P[i].x, P[i].y) : ctx.moveTo(P[i].x, P[i].y)); ctx.stroke() }
-  ctx.beginPath(); for (const i of [1, 2, 8, 7]) ctx.lineTo(P[i].x, P[i].y); ctx.closePath(); ctx.fill(); ctx.stroke() // torso
-  line(1, 3, 5); line(2, 4, 6) // arms
-  if (body.kind === 'camera') { line(7, 9, 11); line(8, 10, 12) } // legs (Jump Dodge)
-  const sw = Math.hypot(P[1].x - P[2].x, P[1].y - P[2].y)
-  ctx.beginPath(); ctx.arc(P[0].x, P[0].y, Math.max(22, sw * 0.3), 0, 7); ctx.fill() // head
-  ctx.globalAlpha = 0.9; ctx.fillStyle = 'hsl(205 95% 78%)' // hands
-  for (const i of [5, 6]) { ctx.beginPath(); ctx.arc(P[i].x, P[i].y, w * 0.7, 0, 7); ctx.fill() }
-  ctx.restore()
+  const P = body.pts, w = H * 0.065, OUT = 'hsl(20 45% 16%)', FUR = 'hsl(28 62% 55%)', TAN = 'hsl(36 75% 80%)', SHIRT = 'hsl(210 80% 58%)', PANTS = 'hsl(228 45% 42%)'
+  const mood = mas.mood === 'idle' && now < closeUntil ? 'wow' : mas.mood
+  // Draw opaque on a scratch layer, then fade the whole character once, so overlapping parts don't show through each other.
+  if (avCv.width !== W || avCv.height !== H) { avCv.width = W; avCv.height = H }
+  const c = avCv.getContext('2d'); c.clearRect(0, 0, W, H); c.save(); c.lineCap = c.lineJoin = 'round'
+  const path = (ix) => { c.beginPath(); ix.forEach((i, n) => n ? c.lineTo(P[i].x, P[i].y) : c.moveTo(P[i].x, P[i].y)) }
+  const limb = (ix, color, wd = w) => { path(ix); c.strokeStyle = OUT; c.lineWidth = wd + 10; c.stroke(); c.strokeStyle = color; c.lineWidth = wd; c.stroke() }
+  const blob = (x, y, rx, ry, color) => { c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, 7); c.fillStyle = color; c.fill(); c.strokeStyle = OUT; c.lineWidth = 6; c.stroke() }
+  if (body.kind === 'camera') { // legs + shoes (Jump Dodge)
+    limb([7, 9, 11], PANTS); limb([8, 10, 12], PANTS)
+    for (const i of [11, 12]) blob(P[i].x, P[i].y + w * 0.4, w * 0.7, w * 0.4, OUT)
+  }
+  path([1, 2, 8, 7]); c.closePath() // torso (t-shirt)
+  c.strokeStyle = OUT; c.lineWidth = w + 10; c.stroke(); c.fillStyle = c.strokeStyle = SHIRT; c.lineWidth = w; c.fill(); c.stroke()
+  for (const [sh, el, wr] of [[1, 3, 5], [2, 4, 6]]) { limb([el, wr], FUR, w * 0.85); limb([sh, el], SHIRT, w * 0.95) } // forearm fur, sleeve
+  const sw = Math.hypot(P[1].x - P[2].x, P[1].y - P[2].y), r = Math.max(24, sw * 0.36), hx = P[0].x, hy = P[0].y
+  for (const d of [-1, 1]) { blob(hx + d * r * 0.72, hy - r * 0.72, r * 0.36, r * 0.36, FUR); blob(hx + d * r * 0.72, hy - r * 0.72, r * 0.2, r * 0.2, TAN) } // ears
+  blob(hx, hy, r, r, FUR) // head
+  blob(hx, hy + r * 0.32, r * 0.46, r * 0.36, TAN) // muzzle
+  blob(hx, hy + r * 0.12, r * 0.14, r * 0.1, OUT) // nose
+  const shut = mood === 'sleep' || now % 3400 < 120
+  for (const d of [-1, 1]) {
+    const ex = hx + d * r * 0.4, ey = hy - r * 0.2, er = r * (mood === 'wow' ? 0.27 : 0.2)
+    if (shut) { c.strokeStyle = OUT; c.lineWidth = 5; c.beginPath(); c.moveTo(ex - er, ey); c.lineTo(ex + er, ey); c.stroke(); continue }
+    const a = Math.atan2(gaze.y - ey, gaze.x - ex)
+    blob(ex, ey, er, er, '#fff'); c.fillStyle = OUT; c.beginPath(); c.arc(ex + Math.cos(a) * er * 0.4, ey + Math.sin(a) * er * 0.4, er * 0.5, 0, 7); c.fill()
+  }
+  const my = hy + r * 0.5; c.strokeStyle = c.fillStyle = OUT; c.lineWidth = 5; c.beginPath()
+  if (mood === 'happy') { c.arc(hx, my - r * 0.14, r * 0.22, 0, Math.PI); c.fill() }
+  else if (mood === 'wow') { c.ellipse(hx, my, r * 0.1, r * 0.14, 0, 0, 7); c.fill() }
+  else if (mood === 'sad') { c.arc(hx, my + r * 0.18, r * 0.16, Math.PI * 1.15, Math.PI * 1.85); c.stroke() }
+  else if (mood === 'sleep') { c.moveTo(hx - r * 0.1, my); c.lineTo(hx + r * 0.1, my); c.stroke() }
+  else { c.arc(hx, my - r * 0.14, r * 0.18, Math.PI * 0.15, Math.PI * 0.85); c.stroke() }
+  for (const i of [5, 6]) blob(P[i].x, P[i].y, w * 0.68, w * 0.68, '#fff') // mitten hands
+  c.restore()
+  ctx.globalAlpha = mode === 'letters' ? 0.72 : 0.55; ctx.drawImage(avCv, 0, 0); ctx.globalAlpha = 1
 }
 
 function onPose(m) {
@@ -441,7 +467,7 @@ function draw() {
   const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now
   if (sessionOver) drawSessionOver(now)
   else {
-    if (now - lastPoseAt < 1500) drawAvatar()
+    if (now - lastPoseAt < 1500) drawAvatar(now)
     mode === 'letters' ? drawLetters(now) : drawJump(now)
     if (now - lastPoseAt > 2500 && now > 4000) { // nobody in view
       ctx.font = '600 40px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,' + (0.6 + Math.sin(now / 300) * 0.3) + ')'
