@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { networkInterfaces } from 'node:os'
 import express from 'express'
 import { WebSocketServer } from 'ws'
+import { interpret } from './voice.js'
 
 const PORT = process.env.PORT || 3000
 const lanIp = Object.values(networkInterfaces()).flat()
@@ -18,6 +19,8 @@ if (!existsSync(cert)) {
 }
 
 const app = express()
+app.use(express.json({ limit: '4kb' }))
+app.post('/api/voice', async (req, res) => res.json({ command: await interpret(req.body?.transcript ?? '') }))
 app.use('/phone', express.static(new URL('../phone-app', import.meta.url).pathname))
 app.use('/tv', express.static(new URL('../tv-app', import.meta.url).pathname))
 app.get('/', (_req, res) => res.send('<a href="/phone">phone-app</a> · <a href="/tv">tv-app</a>'))
@@ -35,6 +38,15 @@ wss.on('connection', (ws, req) => {
       if (m.startsWith('{"type":"sync"')) return ws.send(JSON.stringify({ ...JSON.parse(m), s: Date.now() }))
     }
     if (ws.role !== 'phone') return
+    // Voice: turn the transcript into a structured command for the TVs; the phone gets the result back for display.
+    if (!isBinary && data.toString().startsWith('{"type":"voice_command"')) {
+      let text; try { text = JSON.parse(data.toString()).text } catch { return }
+      return interpret(text).then((command) => {
+        ws.send(JSON.stringify({ type: 'voice_result', text, command }))
+        if (command) for (const c of wss.clients) if (c.role === 'tv' && c.readyState === 1)
+          c.send(JSON.stringify({ type: 'game_command', name: command.name, input: command.input }))
+      })
+    }
     for (const c of wss.clients) if (c.role === 'tv' && c.readyState === 1) c.send(data, { binary: isBinary })
   })
 })

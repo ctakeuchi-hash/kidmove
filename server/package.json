@@ -2,8 +2,11 @@
   "name": "server",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "node index.js" },
+  "scripts": {
+    "dev": "node index.js"
+  },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
     "express": "^5.1.0",
     "ws": "^8.18.0"
   }
