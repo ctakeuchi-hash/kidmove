@@ -12,6 +12,7 @@
 </style>
 <canvas id="c"></canvas>
 <div id="menu"><button data-g="letters">✏️ Letters (1)</button><button data-g="jump">🦘 Jump (2)</button><button id="snd"></button></div>
+<div id="ver" style="position:fixed;left:12px;bottom:8px;color:#889;font:14px monospace"></div>
 <pre id="hud">connecting…</pre>
 <script>
 // ---- Config: override any of these via URL, e.g. /tv/?threshold=0.6&brush=0.12&mouse=1 ----
@@ -33,6 +34,7 @@ const CONFIG = {
 }
 for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = k === 'letters' || k === 'game' || k === 'mapping' ? v : +v
 
+fetch('/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => document.getElementById('ver').textContent = 'v' + v.version).catch(() => {})
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), hud = document.getElementById('hud')
 let W, H, size
 const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; size = Math.min(W, H) * 0.8; loadLetter(idx) }

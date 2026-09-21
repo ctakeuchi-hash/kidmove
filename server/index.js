@@ -19,7 +19,9 @@ if (!existsSync(cert)) {
     '-addext', `subjectAltName=IP:${lanIp},DNS:localhost`, '-keyout', key, '-out', cert], { stdio: 'ignore' })
 }
 
+const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url)))
 const app = express()
+app.get('/version', (_req, res) => res.json({ version })) // shown on the phone and TV pages
 app.use(express.json({ limit: '4kb' }))
 app.use('/theme-assets', express.static(CACHE_DIR))
 app.post('/api/theme', async (req, res) => {
@@ -65,6 +67,7 @@ wss.on('connection', (ws, req) => {
 })
 
 server.listen(PORT, () => {
+  console.log(`kids-motion-game v${version}`)
   console.log(`phone: https://${lanIp}:${PORT}/phone`)
   console.log(`tv:    https://${lanIp}:${PORT}/tv`)
 })
