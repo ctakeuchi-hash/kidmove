@@ -11,7 +11,7 @@
   pre{position:fixed;top:8px;left:12px;margin:0;color:#6f6;font:16px monospace;opacity:.7}
 </style>
 <canvas id="c"></canvas>
-<div id="menu"><button data-g="letters">✏️ Letters (1)</button><button data-g="jump">🦘 Jump (2)</button></div>
+<div id="menu"><button data-g="letters">✏️ Letters (1)</button><button data-g="jump">🦘 Jump (2)</button><button id="snd"></button></div>
 <pre id="hud">connecting…</pre>
 <script>
 // ---- Config: override any of these via URL, e.g. /tv/?threshold=0.6&brush=0.12&mouse=1 ----
@@ -24,6 +24,8 @@ const CONFIG = {
   pauseMs: 2500,    // celebration time before next letter
   jumpThreshold: 0.05, // Jump Dodge: hip rise (fraction of camera height) that counts as a jump
   jumpSpeed: 0.3,      // Jump Dodge: obstacle speed, screen widths per second
+  sessionMin: 15,      // minutes of active play before the break screen
+  closeZ: -0.5,        // wrist depth (MediaPipe z, smaller = nearer the camera) that makes the mascot gasp
   game: 'letters',     // start mode: letters | jump
   mouse: 0,         // 1 = use the mouse as the wrist (test without a phone)
 }
@@ -35,11 +37,11 @@ const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; s
 const FONT = () => `900 ${size}px "Arial Black", Arial, sans-serif`
 
 // ---- Letter: sample the glyph body on a grid; coverage = fraction of samples the brush has touched ----
-let winTimer, idx = 0, samples = [], step = 10, covered = 0, won = false, hue = 0
+let lastStep = 0, winTimer, idx = 0, samples = [], step = 10, covered = 0, won = false, hue = 0
 function loadLetter(i) {
   idx = (i + CONFIG.letters.length) % CONFIG.letters.length
   clearTimeout(winTimer) // a manual skip/restart must cancel the pending auto-advance
-  won = false; covered = 0; trail.length = 0; confetti.length = 0
+  won = false; covered = 0; lastStep = 0; trail.length = 0; confetti.length = 0
   hue = (idx * 47) % 360
   const off = new OffscreenCanvas(W, H), o = off.getContext('2d', { willReadFrequently: true })
   o.font = FONT(); o.textAlign = 'center'; o.fillStyle = '#000'
@@ -79,38 +81,129 @@ function onWrists(w) { // w = [[x,y]|null, [x,y]|null] in canvas px
 }
 
 function paint(p, from) {
+  const before = covered
   const R = CONFIG.brush * size, R2 = R * R
   const n = from ? Math.max(1, Math.ceil(Math.hypot(p.x - from.x, p.y - from.y) / (R / 2))) : 1 // interpolate so fast swings leave no gaps
   for (let k = 1; k <= n; k++) {
     const x = from ? from.x + (p.x - from.x) * k / n : p.x, y = from ? from.y + (p.y - from.y) * k / n : p.y
     for (const s of samples) if (!s.on && (s.x - x) ** 2 + (s.y - y) ** 2 < R2) { s.on = true; covered++ }
   }
+  if (samples.length && covered > before && !won) { // instant feedback on every bit of progress
+    spark(p.x, p.y, Math.min(4, covered - before), hue)
+    const step10 = Math.floor(covered / samples.length * 10)
+    sfx.tick(step10)
+    if (step10 > lastStep && covered / samples.length < CONFIG.threshold) { lastStep = step10; sfx.ping(step10); cheer(900); pop(praise(), p.x, p.y - 50) }
+  }
   if (!won && samples.length && covered / samples.length >= CONFIG.threshold) win()
 }
 
-// ---- Celebration ----
-const confetti = []
-let actx
-function tone(f, t0, dur) {
-  const o = actx.createOscillator(), g = actx.createGain()
-  o.type = 'triangle'; o.frequency.value = f
-  g.gain.setValueAtTime(0.25, actx.currentTime + t0); g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + t0 + dur)
-  o.connect(g).connect(actx.destination); o.start(actx.currentTime + t0); o.stop(actx.currentTime + t0 + dur)
+// ---- Audio: everything is synthesised (no files). Sound starts after the first click/key on the TV page. ----
+const confetti = [], fx = [] // fx = sparkles and floating words
+let actx, muted = false, sessionOver = false
+const NOTES = [523.25, 587.33, 659.25, 783.99, 880, 1046.5] // C major pentatonic: anything played together sounds nice
+const AMBIENT = [130.8, 164.8, 196, 220, 261.6]
+const audioOn = () => actx && actx.state === 'running' && !muted
+function tone(f, t0 = 0, dur = 0.3, vol = 0.2, type = 'triangle') {
+  if (!audioOn()) return
+  const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + t0
+  o.type = type; o.frequency.value = f
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur)
+  o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur)
 }
-function celebrate(n) { // confetti + chime, shared by both games
+let lastTick = 0
+const sfx = {
+  tick: (i) => { const n = performance.now(); if (n - lastTick > 140) { lastTick = n; tone(NOTES[i % 6] * 2, 0, 0.1, 0.04, 'sine') } }, // very soft, while painting
+  ping: (i) => tone(NOTES[i % 6], 0, 0.3, 0.15),
+  chime: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.12, 0.4, 0.22)),
+  jump: () => { tone(330, 0, 0.12, 0.1, 'sine'); tone(494, 0.06, 0.15, 0.1, 'sine') },
+  pass: () => { tone(784, 0, 0.15, 0.14); tone(1047, 0.09, 0.25, 0.14) },
+  oops: () => { tone(220, 0, 0.25, 0.1, 'sine'); tone(196, 0.12, 0.3, 0.08, 'sine') }, // soft, never scary
+  boop: () => { tone(440, 0, 0.1, 0.12, 'sine'); tone(660, 0.07, 0.15, 0.12, 'sine') },
+}
+// Ambient: a soft pentatonic note drifts in every few seconds.
+setInterval(() => {
+  if (!audioOn() || sessionOver) return
+  const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime
+  o.type = 'sine'; o.frequency.value = AMBIENT[Math.floor(Math.random() * AMBIENT.length)]
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.03, t + 1.4); g.gain.exponentialRampToValueAtTime(0.0001, t + 5)
+  o.connect(g).connect(actx.destination); o.start(t); o.stop(t + 5)
+}, 2600)
+const unlock = () => { actx ||= new AudioContext(); actx.resume().then(syncMenu) }
+addEventListener('pointerdown', unlock); addEventListener('keydown', unlock)
+addEventListener('pointerdown', (e) => { if (sessionOver && e.clientY > innerHeight * 0.85) startSession() })
+
+// ---- Feedback: sparkles, floating praise, confetti ----
+const PRAISE = ['Nice!', 'Great!', 'Wow!', 'Awesome!', 'You got it!', 'Amazing!', 'Super!']
+const praise = () => PRAISE[Math.floor(Math.random() * PRAISE.length)]
+function spark(x, y, n = 1, h = null) {
+  for (let i = 0; i < n; i++) fx.push({ x, y, vx: (Math.random() - .5) * 7, vy: -Math.random() * 6 - 1, life: 0, max: 500 + Math.random() * 500,
+    c: `hsl(${h ?? Math.random() * 360} 100% 70%)` })
+}
+function pop(text, x, y) { fx.push({ text, x, y, vx: 0, vy: -1.5, life: 0, max: 1200 }) }
+function celebrate(n) { // confetti + chime + happy mascot, shared by both games
   for (let i = 0; i < n; i++) confetti.push({ x: W / 2, y: H / 2, vx: (Math.random() - .5) * 26, vy: -Math.random() * 22 - 4,
     r: Math.random() * 6.28, vr: (Math.random() - .5) * .4, c: `hsl(${Math.random() * 360} 90% 60%)`, s: 8 + Math.random() * 10 })
-  try { [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.12, 0.4)) } catch {}
+  sfx.chime(); cheer(2500)
 }
-function win() {
-  won = true
-  for (const s of samples) s.on = true // letter fills with colour
-  celebrate(180)
-  winTimer = setTimeout(() => loadLetter(idx + 1), CONFIG.pauseMs)
+function drawFx(dt) {
+  for (const f of fx) {
+    f.life += dt * 1000; f.x += f.vx; f.y += f.vy
+    if (f.text) { ctx.globalAlpha = Math.max(0, 1 - f.life / f.max); ctx.font = '800 44px system-ui'; ctx.textAlign = 'center'
+      ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 8; ctx.fillText(f.text, f.x, f.y); ctx.shadowBlur = 0 }
+    else { f.vy += 0.25; ctx.globalAlpha = Math.max(0, 1 - f.life / f.max); ctx.fillStyle = f.c; ctx.fillRect(f.x - 3, f.y - 3, 6, 6) }
+  }
+  ctx.globalAlpha = 1
+  for (let i = fx.length - 1; i >= 0; i--) if (fx[i].life > fx[i].max) fx.splice(i, 1)
 }
-// Browsers block audio until a user gesture; one click/key on the TV page unlocks it.
-const unlock = () => { actx ||= new AudioContext(); actx.resume() }
-addEventListener('pointerdown', unlock); addEventListener('keydown', unlock)
+
+// ---- Mascot: always on screen, idles, looks at your hand, cheers, winces, gasps when your hand nears the camera ----
+const mas = { hop: 0, vy: 0, mood: 'idle', until: 0 }, gaze = { x: 0, y: 0 }
+let closeUntil = 0
+function setMood(m, ms) { mas.mood = m; mas.until = performance.now() + ms }
+function cheer(ms = 1400) { mas.vy = -16; setMood('happy', ms) }
+function drawMascot(now, cx, base, r) {
+  mas.vy += 1.1; mas.hop += mas.vy; if (mas.hop > 0) { mas.hop = 0; mas.vy = 0 }
+  if (mas.mood !== 'sleep' && now > mas.until) mas.mood = 'idle'
+  const mood = mas.mood === 'idle' && now < closeUntil ? 'wow' : mas.mood
+  const breathe = 1 + Math.sin(now / 500) * 0.03, stretch = 1 + Math.max(-0.2, Math.min(0.25, -mas.vy * 0.012))
+  const rx = r * (mood === 'wow' ? 1.25 : 1) * breathe / stretch, ry = r * (mood === 'wow' ? 1.25 : 1) * breathe * stretch
+  const x = cx + (mood === 'sad' ? Math.sin(now / 40) * 4 : 0), y = base - ry + mas.hop
+  ctx.fillStyle = 'hsl(150 70% 62%)'; ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, 7); ctx.fill()
+  if (mood === 'happy') { ctx.fillStyle = 'rgba(255,120,150,.6)'; for (const d of [-1, 1]) { ctx.beginPath(); ctx.arc(x + d * rx * 0.62, y + ry * 0.2, r * 0.13, 0, 7); ctx.fill() } }
+  const blink = mood === 'sleep' || now % 3200 < 120
+  for (const d of [-1, 1]) {
+    const ex = x + d * rx * 0.35, ey = y - ry * 0.15, er = r * (mood === 'wow' ? 0.3 : 0.22)
+    if (blink) { ctx.strokeStyle = '#124'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(ex - er, ey); ctx.lineTo(ex + er, ey); ctx.stroke(); continue }
+    const a = Math.atan2(gaze.y - ey, gaze.x - ex), look = er * 0.4 // pupils follow the tracked hand
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ex, ey, er, 0, 7); ctx.fill()
+    ctx.fillStyle = '#124'; ctx.beginPath(); ctx.arc(ex + Math.cos(a) * look, ey + Math.sin(a) * look, er * 0.5, 0, 7); ctx.fill()
+  }
+  ctx.strokeStyle = '#124'; ctx.fillStyle = '#124'; ctx.lineWidth = 4; ctx.lineCap = 'round'
+  const my = y + ry * 0.35
+  ctx.beginPath()
+  if (mood === 'happy') { ctx.arc(x, my - r * 0.1, r * 0.3, 0, Math.PI); ctx.fill() }
+  else if (mood === 'wow') { ctx.ellipse(x, my + r * 0.05, r * 0.14, r * 0.2, 0, 0, 7); ctx.fill() }
+  else if (mood === 'sad') { ctx.arc(x, my + r * 0.25, r * 0.2, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke() }
+  else if (mood === 'sleep') { ctx.moveTo(x - r * 0.12, my); ctx.lineTo(x + r * 0.12, my); ctx.stroke() }
+  else { ctx.arc(x, my - r * 0.12, r * 0.25, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke() }
+  if (mood === 'sleep') { ctx.font = `700 ${r * 0.5}px system-ui`; ctx.textAlign = 'left'; ctx.fillStyle = '#fff'
+    ctx.fillText('z', x + rx, y - ry * 0.6 - Math.sin(now / 400) * 6); ctx.fillText('Z', x + rx * 1.3, y - ry * 0.9 - Math.sin(now / 400 + 1) * 6) }
+}
+
+// ---- Session: ~15 minutes of active play, then a break screen. No streaks, scores don't carry over. ----
+let playMs = 0, lastPoseAt = -1e9
+function endSession() { sessionOver = true; setMood('sleep', 1e12); confetti.length = 0 }
+function startSession() { sessionOver = false; playMs = 0; setMood('idle', 0); mode === 'jump' ? jumpReset() : loadLetter(0) }
+setInterval(() => { if (!sessionOver && performance.now() - lastPoseAt < 5000 && (playMs += 1000) >= CONFIG.sessionMin * 60000) endSession() }, 1000)
+function drawSessionOver(now) {
+  ctx.fillStyle = 'rgba(11,11,26,0.88)'; ctx.fillRect(0, 0, W, H)
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'
+  ctx.font = '900 84px system-ui'; ctx.fillText('★ Great playing today! ★', W / 2, H * 0.28)
+  ctx.font = '500 40px system-ui'; ctx.fillText('Time for a break.', W / 2, H * 0.28 + 70)
+  ctx.fillText('Stretch, drink some water, look out the window.', W / 2, H * 0.28 + 125)
+  ctx.font = '400 22px system-ui'; ctx.fillStyle = '#889'; ctx.fillText('Grown-up: press Enter (or tap here) to start a new session', W / 2, H - 30)
+  drawMascot(now, W / 2, H * 0.85, Math.min(H * 0.13, 90))
+}
 
 // ---- Voice commands (structured, from the server) ----
 const LEVELS = { easy: [0.5, 0.12], medium: [0.7, 0.09], hard: [0.85, 0.07] } // [threshold, brush]
@@ -170,9 +263,20 @@ function setMode(name) {
   if (mode === 'letters') loadLetter(idx); else jumpReset()
   syncMenu(); notice = { text: mode === 'jump' ? 'Jump Dodge! Jump over the spikes' : 'Sky-Writing! Trace the letter', until: performance.now() + 2500 }
 }
-const syncMenu = () => document.querySelectorAll('#menu button').forEach((b) => b.classList.toggle('on', b.dataset.g === mode))
-document.querySelectorAll('#menu button').forEach((b) => b.onclick = () => setMode(b.dataset.g))
-function onPose(k, wristPx) { // k = [L wrist, R wrist, L hip, R hip], normalised
+const syncMenu = () => {
+  document.querySelectorAll('#menu button[data-g]').forEach((b) => b.classList.toggle('on', b.dataset.g === mode))
+  document.getElementById('snd').textContent = !actx || actx.state !== 'running' ? '🔇 click for sound' : muted ? '🔇 (M)' : '🔊 (M)'
+}
+document.getElementById('snd').onclick = () => { if (actx && actx.state === 'running') { muted = !muted; syncMenu() } }
+document.querySelectorAll('#menu button[data-g]').forEach((b) => b.onclick = () => setMode(b.dataset.g))
+function onPose(k, wristPx) { // k = [L wrist, R wrist, L hip, R hip], normalised; entries may carry z as a third value
+  const now = performance.now(); lastPoseAt = now
+  if (sessionOver) return
+  const hi = wristPx[0][1] < wristPx[1][1] ? 0 : 1; gaze.x = wristPx[hi][0]; gaze.y = wristPx[hi][1] // mascot watches the raised hand
+  if (Math.min(k[0][2] ?? 0, k[1][2] ?? 0) < CONFIG.closeZ) { // hand reaching toward the camera
+    if (now > closeUntil + 1500) { sfx.boop(); pop('Whoa!', W - 150, H - 200) }
+    closeUntil = now + 300
+  }
   if (mode === 'letters') onWrists(wristPx)
   else onHips(k)
 }
@@ -194,6 +298,8 @@ function drawJump(now) {
   const fake = (now - jump.fakeAt) / 600 // Space bar = scripted jump for testing without a camera
   let rise = now - jump.lastPose > 400 ? 0 : Math.max(0, jump.rise) // lost tracking counts as standing still, not as a stuck jump
   if (fake >= 0 && fake <= 1) rise = Math.max(rise, Math.sin(Math.PI * fake) * thr * 2)
+  if (rise >= thr && !jump.air && !jump.over) { sfx.jump(); spark(px, ground, 8, 200) } // instant reward for every jump
+  jump.air = rise >= thr
   const lift = Math.min(2.5, rise / thr) * obH // feet clear a spike exactly when rise >= threshold
 
   if (!jump.over) {
@@ -206,9 +312,11 @@ function drawJump(now) {
       const overlap = o.x < px + pw / 2 && o.x + obW > px - pw / 2
       if (overlap && !o.hit && rise < thr && now > jump.hitUntil) {
         o.hit = true; jump.hitUntil = now + 1000
+        sfx.oops(); setMood('sad', 1200); pop(jump.lives > 1 ? 'Oops! Keep going!' : 'Oh no!', px, ground - obH * 2)
         if (--jump.lives <= 0) jump.over = now + 3000
       } else if (!o.hit && !o.passed && o.x + obW < px - pw / 2) {
         o.passed = true
+        sfx.pass(); cheer(900); pop('+1', px, ground - lift - pw * 1.8); spark(px, ground - lift, 10)
         if (++jump.score % 5 === 0) celebrate(80)
       }
     }
@@ -228,12 +336,14 @@ function drawJump(now) {
   }
   ctx.font = '600 34px system-ui'; ctx.textAlign = 'left'; ctx.fillStyle = '#fff'
   ctx.fillText(`Score ${jump.score}   ${'♥'.repeat(Math.max(0, jump.lives))}`, 20, 64)
-  if (jump.over) { ctx.font = '900 96px system-ui'; ctx.textAlign = 'center'; ctx.fillText(`Game over! Score ${jump.score}`, W / 2, H * 0.42) }
+  if (jump.over) { ctx.font = '900 96px system-ui'; ctx.textAlign = 'center'; ctx.fillText(`Great job! Score ${jump.score}`, W / 2, H * 0.42) }
 }
 
 // ---- Dev controls ----
 addEventListener('keydown', (e) => {
-  if (e.key === '1') setMode('letters')
+  if (e.key === 'Enter' && sessionOver) startSession()
+  else if (e.key === 'm' || e.key === 'M') { muted = !muted; syncMenu() }
+  else if (e.key === '1') setMode('letters')
   else if (e.key === '2') setMode('jump')
   else if (e.key === ' ') jump.fakeAt = performance.now()
   else if (mode === 'jump') {
@@ -274,11 +384,18 @@ function drawLetters(now) {
   ctx.fillStyle = '#fff'; ctx.fillRect(bx + bw * CONFIG.threshold - 2, by - 4, 4, 20)
 }
 
+let lastFrame = performance.now()
 function draw() {
   const now = performance.now()
   ctx.clearRect(0, 0, W, H)
   drawBackground()
-  mode === 'letters' ? drawLetters(now) : drawJump(now)
+  const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now
+  if (sessionOver) drawSessionOver(now)
+  else {
+    mode === 'letters' ? drawLetters(now) : drawJump(now)
+    drawMascot(now, W - Math.min(H * 0.08, 60) * 2, H - 20, Math.min(H * 0.08, 60))
+    drawFx(dt)
+  }
   for (const c of confetti) {
     c.x += c.vx; c.y += c.vy; c.vy += 0.5; c.r += c.vr
     ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); ctx.fillStyle = c.c; ctx.fillRect(-c.s / 2, -c.s / 4, c.s, c.s / 2); ctx.restore()
@@ -314,7 +431,7 @@ setInterval(() => {
   const avg = lat.length ? (lat.reduce((a, b) => a + b) / lat.length).toFixed(0) + 'ms' : '…'
   const info = mode === 'letters' ? `${CONFIG.letters[idx]}  ${(100 * covered / Math.max(1, samples.length)).toFixed(0)}% / ${(CONFIG.threshold * 100).toFixed(0)}%`
     : `jump size ${CONFIG.jumpThreshold.toFixed(2)}  rise ${Math.max(0, jump.rise).toFixed(3)}`
-  hud.textContent = `${info}   latency ${avg}   ${fps.toFixed(0)}/s`
+  hud.textContent = `${info}   session ${(playMs / 60000).toFixed(1)}/${CONFIG.sessionMin}m   latency ${avg}   ${fps.toFixed(0)}/s`
 }, 500)
 
 addEventListener('resize', resize); resize(); syncMenu(); if (mode === 'jump') jumpReset(); draw()

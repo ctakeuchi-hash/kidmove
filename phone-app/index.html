@@ -39,7 +39,7 @@ function tick() {
   const r = pose.detectForVideo(video, t0)
   inf = performance.now() - t0
   const lm = r.landmarks[0]
-  if (lm && ws.readyState === 1) ws.send(JSON.stringify({ type: 'kp', t, k: KEYS.map((i) => [lm[i].x, lm[i].y]) }))
+  if (lm && ws.readyState === 1) ws.send(JSON.stringify({ type: 'kp', t, k: KEYS.map((i) => [lm[i].x, lm[i].y, +lm[i].z.toFixed(3)]) }))
   frames++
   if (performance.now() - last > 1000) {
     log(`fps ${frames}\ninference ${inf.toFixed(1)}ms\n${lm ? 'tracking' : 'no pose'}`)
