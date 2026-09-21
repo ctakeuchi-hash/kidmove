@@ -5,102 +5,165 @@
 <style>
   html,body{margin:0;height:100%;background:#0b0b1a;overflow:hidden}
   canvas{display:block;width:100vw;height:100vh}
-  #menu{position:fixed;top:10px;right:12px;display:flex;gap:8px}
-  #menu button{font:600 18px system-ui;padding:8px 16px;border-radius:20px;border:2px solid #fff6;background:#0006;color:#fff;cursor:pointer}
-  #menu button.on{background:#fff;color:#111}
+  #bar{position:fixed;top:10px;right:12px;display:flex;gap:8px}
+  #bar button{font:600 18px system-ui;padding:8px 16px;border-radius:20px;border:2px solid #fff6;background:#0006;color:#fff;cursor:pointer}
   pre{position:fixed;top:8px;left:12px;margin:0;color:#6f6;font:16px monospace;opacity:.7}
 </style>
+<script src="kana.js"></script>
+<script src="strokes.js"></script>
 <canvas id="c"></canvas>
-<div id="menu"><button data-g="letters">✏️ Letters (1)</button><button data-g="jump">🦘 Jump (2)</button><button id="snd"></button></div>
+<div id="bar"><button id="btnSkip">⏭ Skip</button><button id="btnMenu">🏠 Menu</button><button id="snd"></button></div>
 <div id="ver" style="position:fixed;left:12px;bottom:8px;color:#889;font:14px monospace"></div>
 <pre id="hud">connecting…</pre>
 <script>
-// ---- Config: override any of these via URL, e.g. /tv/?threshold=0.6&brush=0.12&mouse=1 ----
-// Live tuning: ArrowUp/Down = threshold ±5% (Jump: jump size ±0.01), ArrowRight/Left = next/prev letter.
-// Modes: keys 1 / 2, the buttons top-right, the phone's buttons, or voice ("play jump dodge"). Space = fake jump (testing). [ and ] = shrink/grow how far your arms reach.
+// ---- Config: override any of these via URL, e.g. /tv/?set=hiragana&players=2&threshold=0.7&mouse=1 ----
+// Start straight into a game with ?game=jump or ?set=upper|lower|digits|hiragana|katakana (no param = menu).
+// Keys: 1-5 pick a character set, 6 Jump Dodge, P = 1/2 players, Esc = menu, ←/→ = prev/next character, ↑/↓ = how much of a stroke is needed
+// (Jump: jump size), [ ] = arm reach, M = mute, Space = fake jump (testing), Enter = new session after the break scene.
 const CONFIG = {
-  threshold: 0.7,   // fraction of the letter that must be covered to pass
-  brush: 0.09,      // brush radius as a fraction of letter height (bigger = more forgiving)
-  letters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-  pauseMs: 2500,    // celebration time before next letter
+  threshold: 0.85,  // fraction of each stroke you must trace to complete it
+  brush: 0.1,       // how far your hand may stray from the line, as a fraction of letter height (bigger = more forgiving)
+  letters: '',      // override the characters of the chosen set, e.g. ?letters=AB
+  pauseMs: 2500,    // celebration time before the next character
   jumpThreshold: 0.05, // Jump Dodge: hip rise (fraction of camera height) that counts as a jump
-  jumpSpeed: 0.3,      // Jump Dodge: obstacle speed, screen widths per second
-  sessionMin: 15,      // minutes of active play before the break screen
+  jumpSpeed: 0.3,      // Jump Dodge: obstacle speed, scene widths per second
+  sessionMin: 15,      // minutes of active play before the break scene
   closeZ: -0.5,        // wrist depth (MediaPipe z, smaller = nearer the camera) that makes the mascot gasp
-  reach: 0.5,          // Letters: torso lengths of screen height per torso length of arm movement (bigger = smaller movements needed)
-  mapping: 'body',     // Letters: 'body' = hands measured from your shoulders (avatar fixed on screen); 'camera' = raw camera position
-  game: 'letters',     // start mode: letters | jump
-  mouse: 0,         // 1 = use the mouse as the wrist (test without a phone)
+  reach: 0.5,          // torso lengths of scene height per torso length of arm movement (bigger = smaller movements needed)
+  mapping: 'body',     // 'body' = hands measured from your shoulders (avatar fixed on scene); 'camera' = raw camera position
+  game: '',            // '' = menu, 'trace' or 'jump' = start playing
+  set: '',             // upper | lower | digits | hiragana | katakana
+  players: 1,          // 1 or 2 (two players trace the same character together)
+  dwellMs: 1000,       // hold your hand on a menu button this long to press it
+  mouse: 0,            // 1 = use the mouse as the wrist (test without a phone)
 }
-for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = k === 'letters' || k === 'game' || k === 'mapping' ? v : +v
+for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = ['letters', 'game', 'mapping', 'set'].includes(k) ? v : +v
 
 fetch('/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => document.getElementById('ver').textContent = 'v' + v.version).catch(() => {})
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), hud = document.getElementById('hud')
-let W, H, size
-const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; size = Math.min(W, H) * 0.8; loadLetter(idx) }
-const FONT = () => `900 ${size}px "Arial Black", Arial, sans-serif`
+let W, H
+const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; if (scene === 'play' && mode === 'trace') loadChar(idx) }
 
-// ---- Letter: sample the glyph body on a grid; coverage = fraction of samples the brush has touched ----
-let lastStep = 0, winTimer, idx = 0, samples = [], step = 10, covered = 0, won = false, hue = 0
-function loadLetter(i) {
-  idx = (i + CONFIG.letters.length) % CONFIG.letters.length
-  clearTimeout(winTimer) // a manual skip/restart must cancel the pending auto-advance
-  won = false; covered = 0; lastStep = 0; trail.length = 0; confetti.length = 0
-  hue = (idx * 47) % 360
-  const off = new OffscreenCanvas(W, H), o = off.getContext('2d', { willReadFrequently: true })
-  o.font = FONT(); o.textAlign = 'center'; o.fillStyle = '#000'
-  const ch = CONFIG.letters[idx], m = o.measureText(ch)
-  glyphY = H / 2 + (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2
-  o.fillText(ch, W / 2, glyphY)
-  const px = o.getImageData(0, 0, W, H).data
-  step = Math.max(6, Math.round(size / 45)); samples = []
-  for (let y = 0; y < H; y += step) for (let x = 0; x < W; x += step)
-    if (px[(y * W + x) * 4 + 3] > 128) samples.push({ x, y, on: false })
+// ---- App state ----
+let scene = 'menu'                 // 'menu' | 'play'
+let mode = 'trace', set = 'upper'   // what is being played: 'trace' (character set = set) or 'jump'
+let nPlayers = CONFIG.players === 2 ? 2 : 1
+let winTimer, idx = 0, won = false, hue = 0
+const chars = () => CONFIG.letters ? [...CONFIG.letters] : SETS[set].chars
+const wantPoses = () => (scene === 'play' && mode === 'jump') ? 1 : nPlayers // how many people the phone should track
+
+// ---- Players (trace game + menu pointers). Each has their own hand history, trail and copy of the character ----
+const newPlayer = (i) => ({ i, hist: [[], []], dom: 0, prev: null, trail: [], body: null, torso: null, strokes: [], cur: 0, done: false, lastPoseAt: -1e9, ptr: null, size: 1, cx: 0 })
+const PL = [newPlayer(0), newPlayer(1)]
+const active = () => PL.slice(0, nPlayers)
+const PALETTE = [{ fur: 'hsl(28 62% 55%)', shirt: 'hsl(210 80% 58%)' }, { fur: 'hsl(42 58% 66%)', shirt: 'hsl(335 75% 62%)' }]
+
+// Where each player's letter (and shoulders) sit on scene
+function layout(i) {
+  const bw = SETS[set].w
+  if (nPlayers === 1) return { cx: W / 2, size: Math.min(H * 0.8, W * 0.6 / bw) }
+  return { cx: W * (i ? 0.75 : 0.25), size: Math.min(H * 0.7, W * 0.4 / bw) }
 }
-let glyphY = 0
+const anchorX = (i) => scene === 'menu' ? (nPlayers === 1 ? W / 2 : W * (i ? 0.58 : 0.42)) : layout(i).cx
+
+// ---- Trace game: each character is a list of strokes (strokes.js / kana.js). Trace them IN ORDER, each in its own direction:
+// start near the numbered dot, follow the arrows. Paint only appears along the line you have actually traced.
+function loadChar(i) {
+  const list = chars(); idx = (i + list.length) % list.length
+  clearTimeout(winTimer) // a manual skip/restart must cancel the pending auto-advance
+  won = false; confetti.length = 0; hue = (idx * 47) % 360
+  const bw = SETS[set].w
+  for (const pl of active()) {
+    const { cx, size } = layout(pl.i); pl.cx = cx; pl.size = size
+    const ox = cx - bw / 2 * size, oy = H / 2 - 0.5 * size // character box is bw x 1 (in character heights), centred on cx
+    pl.strokes = (STROKES[list[idx]] || []).map((s) => {
+      const pts = s.map(([x, y]) => ({ x: ox + x * size, y: oy + y * size })), cum = [0]
+      for (let k = 1; k < pts.length; k++) cum.push(cum[k - 1] + Math.hypot(pts[k].x - pts[k - 1].x, pts[k].y - pts[k - 1].y))
+      return { pts, cum, len: cum[cum.length - 1], d: 0 } // d = how far along the stroke (px) you have traced
+    })
+    pl.cur = 0; pl.done = false; pl.trail.length = 0; pl.prev = null
+  }
+  speak(list[idx])
+}
+function pointAt(st, d) { // position + direction at arc-length d
+  d = Math.max(0, Math.min(st.len, d))
+  let k = 1; while (k < st.pts.length - 1 && st.cum[k] < d) k++
+  const a = st.pts[k - 1], b = st.pts[k], t = (d - st.cum[k - 1]) / ((st.cum[k] - st.cum[k - 1]) || 1)
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, ang: Math.atan2(b.y - a.y, b.x - a.x) }
+}
+function tracePath(st, d0, d1) { // adds the part of the stroke between two arc-lengths to the current canvas path
+  const p0 = pointAt(st, d0); ctx.beginPath(); ctx.moveTo(p0.x, p0.y)
+  for (let k = 1; k < st.pts.length; k++) if (st.cum[k] > d0 && st.cum[k] < d1) ctx.lineTo(st.pts[k].x, st.pts[k].y)
+  const p1 = pointAt(st, d1); ctx.lineTo(p1.x, p1.y)
+}
+// furthest point along the stroke, inside [lo, hi] (arc-length), that (x, y) is within R of; -1 if none
+function nearestAlong(st, x, y, R, lo, hi) {
+  let best = -1
+  for (let k = 1; k < st.pts.length; k++) {
+    const a = st.pts[k - 1], b = st.pts[k], sl = st.cum[k] - st.cum[k - 1]
+    if (!sl) continue
+    const t = Math.max(0, Math.min(1, ((x - a.x) * (b.x - a.x) + (y - a.y) * (b.y - a.y)) / (sl * sl)))
+    const d = st.cum[k - 1] + t * sl
+    if (d >= lo && d <= hi && Math.hypot(x - (a.x + (b.x - a.x) * t), y - (a.y + (b.y - a.y) * t)) <= R && d > best) best = d
+  }
+  return best
+}
+
 
 // ---- Input: dominant wrist = the one that has moved most in the last second ----
-const hist = [[], []]      // per wrist: recent {t,x,y}
-let dom = 0, prev = null   // prev = last trail point (same-hand continuity)
-const trail = []           // {x,y,t,brk}
 function motion(h) { let s = 0; for (let i = 1; i < h.length; i++) s += Math.hypot(h[i].x - h[i - 1].x, h[i].y - h[i - 1].y); return s }
 
-function onWrists(w) { // w = [[x,y]|null, [x,y]|null] in canvas px
+function onWrists(pl, w) { // w = [[x,y]|null, [x,y]|null] in canvas px
   const now = performance.now()
   w.forEach((p, i) => {
     if (!p) return
-    const h = hist[i], l = h[h.length - 1]
+    const h = pl.hist[i], l = h[h.length - 1]
     // light smoothing to kill camera jitter without adding noticeable lag
     const q = l ? { x: l.x * 0.4 + p[0] * 0.6, y: l.y * 0.4 + p[1] * 0.6 } : { x: p[0], y: p[1] }
     h.push({ t: now, ...q })
     while (h[0].t < now - 1000) h.shift()
   })
-  const [a, b] = [motion(hist[0]), motion(hist[1])]
-  const next = dom === 0 ? (b > a * 1.3 ? 1 : 0) : (a > b * 1.3 ? 0 : 1) // hysteresis: don't flicker between hands
-  const switched = next !== dom; dom = next
-  const h = hist[dom], p = h[h.length - 1]
-  if (!p || won) return
-  trail.push({ x: p.x, y: p.y, t: now, brk: switched || !trail.length })
-  paint(p, switched ? null : prev); prev = p
+  const [a, b] = [motion(pl.hist[0]), motion(pl.hist[1])]
+  const next = pl.dom === 0 ? (b > a * 1.3 ? 1 : 0) : (a > b * 1.3 ? 0 : 1) // hysteresis: don't flicker between hands
+  const switched = next !== pl.dom; pl.dom = next
+  const h = pl.hist[pl.dom], p = h[h.length - 1]
+  if (!p || won || pl.done) return
+  pl.trail.push({ x: p.x, y: p.y, t: now, brk: switched || !pl.trail.length })
+  paint(pl, p, switched ? null : pl.prev); pl.prev = p
 }
 
-function paint(p, from) {
-  const before = covered
-  const R = CONFIG.brush * size, R2 = R * R
-  const n = from ? Math.max(1, Math.ceil(Math.hypot(p.x - from.x, p.y - from.y) / (R / 2))) : 1 // interpolate so fast swings leave no gaps
+function paint(pl, p, from) { // called with each new hand position; only the CURRENT stroke can advance, and only forwards
+  const st = pl.strokes[pl.cur]; if (!st) return
+  const R = CONFIG.brush * pl.size, look = Math.max(0.3 * st.len, 2.5 * R), before = st.d
+  const n = from ? Math.max(1, Math.ceil(Math.hypot(p.x - from.x, p.y - from.y) / (R / 2))) : 1 // interpolate so fast swings don't skip
+  let px = from ? from.x : null, py = from ? from.y : null
   for (let k = 1; k <= n; k++) {
     const x = from ? from.x + (p.x - from.x) * k / n : p.x, y = from ? from.y + (p.y - from.y) * k / n : p.y
-    for (const s of samples) if (!s.on && (s.x - x) ** 2 + (s.y - y) ** 2 < R2) { s.on = true; covered++ }
+    // Following the line (chain): hand stays within R of the stroke and only moves forward. Leaving the line breaks the chain,
+    // and to resume (or to start) the hand must come back to where it left off (or the start dot) - so scribbling across doesn't count.
+    const lo = st.chain ? st.d - R * 0.3 : st.d - R * 0.5, hi = st.chain ? st.d + look : st.d === 0 ? 1.3 * R : st.d + 0.6 * R
+    const d = nearestAlong(st, x, y, R, lo, hi)
+    st.chain = d >= 0
+    if (d > st.d) {
+      // the hand must also be travelling ALONG the stroke (not across it): moving direction vs. stroke direction
+      const mx = px === null ? 0 : x - px, my = py === null ? 0 : y - py, mm = Math.hypot(mx, my), a = pointAt(st, d).ang
+      if (mm < 1 || (mx * Math.cos(a) + my * Math.sin(a)) / mm >= 0.3) st.d = d
+    }
+    px = x; py = y
   }
-  if (samples.length && covered > before && !won) { // instant feedback on every bit of progress
-    spark(p.x, p.y, Math.min(4, covered - before), hue)
-    const step10 = Math.floor(covered / samples.length * 10)
-    sfx.tick(step10)
-    if (step10 > lastStep && covered / samples.length < CONFIG.threshold) { lastStep = step10; sfx.ping(step10); cheer(900); pop(praise(), p.x, p.y - 50) }
+  if (st.d <= before) return
+  const frac = st.d / st.len
+  spark(p.x, p.y, 2, hue); sfx.tick(Math.floor(frac * 10)) // instant feedback for every bit of correct progress
+  if (frac >= CONFIG.threshold) { // stroke done: snap it full, reward, move to the next stroke
+    st.d = st.len; st.chain = false; sfx.ping(pl.cur); cheer(900); const e = st.pts[st.pts.length - 1]; spark(e.x, e.y, 14, hue)
+    if (++pl.cur < pl.strokes.length) return pop(praise(), e.x, e.y - 40)
+    pl.done = true // this player finished the character
+    if (active().every((q) => q.done)) win()
+    else { sfx.chime(); pop('Done! Wait for your friend', pl.cx, H * 0.93) }
   }
-  if (!won && samples.length && covered / samples.length >= CONFIG.threshold) win()
 }
 
+let mascotGaze = { x: 0, y: 0 } // where the corner mascot looks (player 1's raised hand)
 // ---- Audio: everything is synthesised (no files). Sound starts after the first click/key on the TV page. ----
 const confetti = [], fx = [] // fx = sparkles and floating words
 let actx, muted = false, sessionOver = false
@@ -151,9 +214,16 @@ function celebrate(n) { // confetti + chime + happy mascot, shared by both games
 }
 function win() {
   won = true
-  for (const s of samples) s.on = true // letter fills with colour
-  celebrate(180)
-  winTimer = setTimeout(() => loadLetter(idx + 1), CONFIG.pauseMs)
+  active().forEach((pl) => pl.strokes.forEach((st) => st.d = st.len))
+  celebrate(nPlayers === 2 ? 260 : 180)
+  if (nPlayers === 2) pop('You did it together!', W / 2, H * 0.5)
+  speak(chars()[idx])
+  winTimer = setTimeout(() => loadChar(idx + 1), CONFIG.pauseMs)
+}
+// Say the character out loud (browser text-to-speech; silent if unavailable or muted)
+function speak(text) {
+  try { if (!audioOn() || scene !== 'play' || mode !== 'trace') return
+    speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = SETS[set].lang; u.rate = 0.8; speechSynthesis.speak(u) } catch {}
 }
 function drawFx(dt) {
   for (const f of fx) {
@@ -166,8 +236,8 @@ function drawFx(dt) {
   for (let i = fx.length - 1; i >= 0; i--) if (fx[i].life > fx[i].max) fx.splice(i, 1)
 }
 
-// ---- Mascot: always on screen, idles, looks at your hand, cheers, winces, gasps when your hand nears the camera ----
-const mas = { hop: 0, vy: 0, mood: 'idle', until: 0 }, gaze = { x: 0, y: 0 }
+// ---- Mascot: always on scene, idles, looks at your hand, cheers, winces, gasps when your hand nears the camera ----
+const mas = { hop: 0, vy: 0, mood: 'idle', until: 0 }
 let closeUntil = 0
 function setMood(m, ms) { mas.mood = m; mas.until = performance.now() + ms }
 function cheer(ms = 1400) { mas.vy = -16; setMood('happy', ms) }
@@ -184,7 +254,7 @@ function drawMascot(now, cx, base, r) {
   for (const d of [-1, 1]) {
     const ex = x + d * rx * 0.35, ey = y - ry * 0.15, er = r * (mood === 'wow' ? 0.3 : 0.22)
     if (blink) { ctx.strokeStyle = '#124'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(ex - er, ey); ctx.lineTo(ex + er, ey); ctx.stroke(); continue }
-    const a = Math.atan2(gaze.y - ey, gaze.x - ex), look = er * 0.4 // pupils follow the tracked hand
+    const a = Math.atan2(mascotGaze.y - ey, mascotGaze.x - ex), look = er * 0.4 // pupils follow the tracked hand
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ex, ey, er, 0, 7); ctx.fill()
     ctx.fillStyle = '#124'; ctx.beginPath(); ctx.arc(ex + Math.cos(a) * look, ey + Math.sin(a) * look, er * 0.5, 0, 7); ctx.fill()
   }
@@ -200,10 +270,10 @@ function drawMascot(now, cx, base, r) {
     ctx.fillText('z', x + rx, y - ry * 0.6 - Math.sin(now / 400) * 6); ctx.fillText('Z', x + rx * 1.3, y - ry * 0.9 - Math.sin(now / 400 + 1) * 6) }
 }
 
-// ---- Session: ~15 minutes of active play, then a break screen. No streaks, scores don't carry over. ----
+// ---- Session: ~15 minutes of active play, then a break scene. No streaks, scores don't carry over. ----
 let playMs = 0, lastPoseAt = -1e9
 function endSession() { sessionOver = true; setMood('sleep', 1e12); confetti.length = 0 }
-function startSession() { sessionOver = false; playMs = 0; setMood('idle', 0); mode === 'jump' ? jumpReset() : loadLetter(0) }
+function startSession() { sessionOver = false; playMs = 0; setMood('idle', 0); showMenu() }
 setInterval(() => { if (!sessionOver && performance.now() - lastPoseAt < 5000 && (playMs += 1000) >= CONFIG.sessionMin * 60000) endSession() }, 1000)
 function drawSessionOver(now) {
   ctx.fillStyle = 'rgba(11,11,26,0.88)'; ctx.fillRect(0, 0, W, H)
@@ -213,19 +283,6 @@ function drawSessionOver(now) {
   ctx.fillText('Stretch, drink some water, look out the window.', W / 2, H * 0.28 + 125)
   ctx.font = '400 22px system-ui'; ctx.fillStyle = '#889'; ctx.fillText('Grown-up: press Enter (or tap here) to start a new session', W / 2, H - 30)
   drawMascot(now, W / 2, H * 0.85, Math.min(H * 0.13, 90))
-}
-
-// ---- Voice commands (structured, from the server) ----
-const LEVELS = { easy: [0.5, 0.12], medium: [0.7, 0.09], hard: [0.85, 0.07] } // [threshold, brush]
-const JUMP_LEVELS = { easy: [0.04, 0.22], medium: [0.05, 0.3], hard: [0.06, 0.42] } // [jumpThreshold, jumpSpeed]
-function runCommand(name, input = {}) {
-  if (name === 'switch_game') setMode(input.name)
-  else if (name === 'restart_game') mode === 'jump' ? jumpReset() : loadLetter(0)
-  else if (name === 'next_letter') mode === 'letters' && loadLetter(idx + 1)
-  else if (name === 'set_difficulty' && LEVELS[input.level]) {
-    [CONFIG.threshold, CONFIG.brush] = LEVELS[input.level]; [CONFIG.jumpThreshold, CONFIG.jumpSpeed] = JUMP_LEVELS[input.level]
-  }
-  else console.warn('unknown command', name, input)
 }
 
 // ---- Themes: server generates an image (or serves it from cache); we show a loading banner meanwhile ----
@@ -265,44 +322,118 @@ function drawBanner(now) {
   ctx.restore()
 }
 
-// ---- Modes: both games read the same pose stream via onPose() ----
-let mode = ['letters', 'jump'].includes(CONFIG.game) ? CONFIG.game : 'letters'
-function setMode(name) {
-  if (!['letters', 'jump'].includes(name) || name === mode) return
-  clearTimeout(winTimer); confetti.length = 0; mode = name
-  if (mode === 'letters') loadLetter(idx); else jumpReset()
-  syncMenu(); notice = { text: mode === 'jump' ? 'Jump Dodge! Jump over the spikes' : 'Sky-Writing! Trace the letter', until: performance.now() + 2500 }
+// ---- Starting games, the menu, and commands (voice / phone buttons / keys all end up here) ----
+const LEVELS = { easy: [0.7, 0.13], medium: [0.85, 0.1], hard: [0.95, 0.07] } // [threshold, brush]
+const JUMP_LEVELS = { easy: [0.04, 0.22], medium: [0.05, 0.3], hard: [0.06, 0.42] } // [jumpThreshold, jumpSpeed]
+const sendConfig = () => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'config', players: wantPoses() })) } // tells the phone how many people to track
+function startGame(kind, s) {
+  clearTimeout(winTimer); confetti.length = 0; fx.length = 0; scene = 'play'; mode = kind
+  if (kind === 'jump') { nPlayers = 1; jumpReset() }
+  else { set = s; loadChar(0) }
+  notice = { text: kind === 'jump' ? 'Jump Dodge! Jump over the spikes' : `${SETS[set].name}${nPlayers === 2 ? ' - 2 players' : ''}`, until: performance.now() + 2500 }
+  sendConfig(); syncBar()
 }
-const syncMenu = () => {
-  document.querySelectorAll('#menu button[data-g]').forEach((b) => b.classList.toggle('on', b.dataset.g === mode))
+function showMenu() { clearTimeout(winTimer); confetti.length = 0; scene = 'menu'; dwell = null; sendConfig(); syncBar() }
+function setPlayers(n) {
+  nPlayers = n === 2 ? 2 : 1
+  if (scene === 'play' && mode === 'jump') startGame('trace', set) // Jump Dodge is 1 player: 2 players means back to tracing
+  else if (scene === 'play') loadChar(idx)
+  sendConfig()
+}
+function runCommand(name, input = {}) {
+  if (name === 'switch_game') {
+    const g = input.name === 'letters' ? 'upper' : input.name
+    if (g === 'jump') startGame('jump'); else if (SETS[g]) startGame('trace', g)
+  }
+  else if (name === 'set_players') setPlayers(input.players)
+  else if (name === 'show_menu') showMenu()
+  else if (name === 'restart_game') scene === 'play' && (mode === 'jump' ? jumpReset() : loadChar(0))
+  else if (name === 'next_letter') scene === 'play' && mode === 'trace' && loadChar(idx + 1)
+  else if (name === 'set_difficulty' && LEVELS[input.level]) {
+    [CONFIG.threshold, CONFIG.brush] = LEVELS[input.level]; [CONFIG.jumpThreshold, CONFIG.jumpSpeed] = JUMP_LEVELS[input.level]
+  }
+  else console.warn('unknown command', name, input)
+}
+const syncBar = () => {
+  document.getElementById('btnMenu').style.display = scene === 'menu' ? 'none' : ''
+  document.getElementById('btnSkip').style.display = scene === 'play' && mode === 'trace' ? '' : 'none'
   document.getElementById('snd').textContent = !actx || actx.state !== 'running' ? '🔇 click for sound' : muted ? '🔇 (M)' : '🔊 (M)'
 }
-document.getElementById('snd').onclick = () => { if (actx && actx.state === 'running') { muted = !muted; syncMenu() } }
-document.querySelectorAll('#menu button[data-g]').forEach((b) => b.onclick = () => setMode(b.dataset.g))
+const syncMenu = syncBar // (audio unlock calls syncMenu)
+document.getElementById('btnMenu').onclick = showMenu
+document.getElementById('btnSkip').onclick = () => loadChar(idx + 1)
+document.getElementById('snd').onclick = () => { if (actx && actx.state === 'running') { muted = !muted; syncBar() } }
+
+// ---- Menu scene: big buttons, pressed by clicking, by holding your hand on one, or from the phone ----
+const MENU_SETS = ['upper', 'lower', 'digits', 'hiragana', 'katakana', 'jump']
+let dwell = null, mouseXY = null
+function menuRects() {
+  const cw = W * 0.24, chh = H * 0.2, gx = W * 0.03, gy = H * 0.04, x0 = (W - (3 * cw + 2 * gx)) / 2, y0 = H * 0.34
+  return [
+    ...[1, 2].map((n, i) => ({ id: 'p' + n, n, x: W / 2 - W * 0.17 + i * W * 0.18, y: H * 0.2, w: W * 0.16, h: H * 0.09 })),
+    ...MENU_SETS.map((id, i) => ({ id, x: x0 + (i % 3) * (cw + gx), y: y0 + Math.floor(i / 3) * (chh + gy), w: cw, h: chh })),
+  ]
+}
+const inRect = (r, x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+function pressMenu(r) {
+  sfx.ping(2); cheer(700)
+  if (r.n) { setPlayers(r.n); return }
+  startGame(r.id === 'jump' ? 'jump' : 'trace', r.id)
+}
+function menuPointers(now) { // hands (fresh poses) and the mouse
+  const p = active().filter((pl) => pl.ptr && now - pl.ptr.t < 500).map((pl) => pl.ptr)
+  return mouseXY ? [...p, mouseXY] : p
+}
+function drawMenu(now, dt) {
+  const rects = menuRects(), ptrs = menuPointers(now)
+  ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = '800 64px system-ui'; ctx.fillText('What shall we play?', W / 2, H * 0.14)
+  let hover = null
+  for (const r of rects) if (ptrs.some((q) => inRect(r, q.x, q.y))) hover = r
+  if (hover && dwell && dwell.id === hover.id) { dwell.ms += dt * 1000; if (dwell.ms >= CONFIG.dwellMs) { const r = hover; dwell = null; pressMenu(r); return } }
+  else dwell = hover ? { id: hover.id, ms: 0 } : null
+  for (const r of rects) {
+    const on = hover === r, sel = r.n ? r.n === nPlayers : (r.id === set && mode === 'trace') || (r.id === 'jump' && mode === 'jump')
+    const k = MENU_SETS.indexOf(r.id), h = r.n ? 45 : (k * 55 + 200) % 360
+    ctx.save(); if (on) { ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(1.05, 1.05); ctx.translate(-r.x - r.w / 2, -r.y - r.h / 2) }
+    ctx.fillStyle = on ? `hsl(${h} 70% 42%)` : `hsl(${h} 45% 26%)`; ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 26); ctx.fill()
+    ctx.lineWidth = sel ? 6 : 3; ctx.strokeStyle = sel ? '#ffd23f' : 'rgba(255,255,255,.3)'; ctx.stroke()
+    ctx.fillStyle = '#fff'
+    if (r.n) { ctx.font = '700 34px system-ui'; ctx.textBaseline = 'middle'; ctx.fillText(r.n === 1 ? '1 Player' : '2 Players', r.x + r.w / 2, r.y + r.h / 2 + 2) }
+    else {
+      ctx.font = `800 ${r.h * 0.42}px system-ui`; ctx.fillText(r.id === 'jump' ? '🦘' : SETS[r.id].label, r.x + r.w / 2, r.y + r.h * 0.55)
+      ctx.font = '600 26px system-ui'; ctx.fillText(r.id === 'jump' ? 'Jump Dodge' : SETS[r.id].name, r.x + r.w / 2, r.y + r.h * 0.86)
+    }
+    if (on && dwell) { ctx.fillStyle = '#ffd23f'; ctx.fillRect(r.x + 20, r.y + r.h - 14, (r.w - 40) * Math.min(1, dwell.ms / CONFIG.dwellMs), 8) } // hold-to-press bar
+    ctx.textBaseline = 'alphabetic'; ctx.restore()
+  }
+  ctx.font = '500 26px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.7)'
+  ctx.fillText('Hold your hand on a button to choose it', W / 2, H - 40)
+  for (const q of ptrs) { ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.shadowColor = '#fff'; ctx.shadowBlur = 20; ctx.beginPath(); ctx.arc(q.x, q.y, 16, 0, 7); ctx.fill(); ctx.shadowBlur = 0 }
+}
+addEventListener('mousemove', (e) => { mouseXY = { x: e.clientX, y: e.clientY, t: performance.now() + 1e9 } })
+addEventListener('pointerdown', (e) => { if (scene === 'menu' && !sessionOver) { const r = menuRects().find((q) => inRect(q, e.clientX, e.clientY)); if (r) pressMenu(r) } })
+
 // ---- Body avatar (a cartoon bear). b = [nose, L/R shoulder, L/R elbow, L/R wrist, L/R hip, L/R knee, L/R ankle], normalised camera coords ----
-// 'body' mapping: your shoulders are pinned to a fixed spot on screen and everything is measured from them in torso lengths,
+// 'body' mapping: your shoulders are pinned to a fixed spot on scene and everything is measured from them in torso lengths,
 // so it works for any height / distance from the phone, and ordinary arm movement covers the whole letter.
 // 'camera' mapping: raw mirrored camera position (used for Jump Dodge so you can see yourself jump).
-let body = null, torsoLen = null
-function layoutBody(m) {
-  if (!m.b) return null
-  const b = m.b, ar = m.ar || 4 / 3
+function layoutBody(pl, b, ar) {
   const sx = (b[1][0] + b[2][0]) / 2, sy = (b[1][1] + b[2][1]) / 2, hx = (b[7][0] + b[8][0]) / 2, hy = (b[7][1] + b[8][1]) / 2
   const tl = Math.hypot((sx - hx) * ar, sy - hy)
-  if (tl > 0.04) torsoLen = torsoLen ? torsoLen * 0.9 + tl * 0.1 : tl
-  const useBody = mode === 'letters' && CONFIG.mapping === 'body' && torsoLen
-  const s = useBody ? CONFIG.reach * H / torsoLen : 0
+  if (tl > 0.04) pl.torso = pl.torso ? pl.torso * 0.9 + tl * 0.1 : tl
+  const useBody = (scene === 'menu' || mode === 'trace') && CONFIG.mapping === 'body' && pl.torso
+  const s = useBody ? CONFIG.reach * H / pl.torso : 0, ax = anchorX(pl.i)
   const pts = b.map(([x, y], i) => {
-    const t = useBody ? { x: W / 2 + (sx - x) * ar * s, y: H * 0.6 + (y - sy) * s } : { x: (1 - x) * W, y: y * H }
-    const o = body && body.pts[i]; return o ? { x: o.x * 0.4 + t.x * 0.6, y: o.y * 0.4 + t.y * 0.6 } : t // light smoothing
+    const t = useBody ? { x: ax + (sx - x) * ar * s, y: H * 0.6 + (y - sy) * s } : { x: (1 - x) * W, y: y * H }
+    const o = pl.body && pl.body.pts[i]; return o ? { x: o.x * 0.4 + t.x * 0.6, y: o.y * 0.4 + t.y * 0.6 } : t // light smoothing
   })
   return { pts, kind: useBody ? 'body' : 'camera' }
 }
 // Cartoon bear "Zip": follows your body; face copies the mascot's mood and its eyes watch your raised hand.
 const avCv = document.createElement('canvas')
-function drawAvatar(now) {
-  if (!body) return
-  const P = body.pts, w = H * 0.065, OUT = 'hsl(20 45% 16%)', FUR = 'hsl(28 62% 55%)', TAN = 'hsl(36 75% 80%)', SHIRT = 'hsl(210 80% 58%)', PANTS = 'hsl(228 45% 42%)'
+function drawAvatar(pl, now) {
+  const body = pl.body; if (!body) return
+  const P = body.pts, w = H * 0.065, pal = PALETTE[pl.i], OUT = 'hsl(20 45% 16%)', FUR = pal.fur, TAN = 'hsl(36 75% 80%)', SHIRT = pal.shirt, PANTS = 'hsl(228 45% 42%)'
   const mood = mas.mood === 'idle' && now < closeUntil ? 'wow' : mas.mood
   // Draw opaque on a scratch layer, then fade the whole character once, so overlapping parts don't show through each other.
   if (avCv.width !== W || avCv.height !== H) { avCv.width = W; avCv.height = H }
@@ -322,7 +453,7 @@ function drawAvatar(now) {
   blob(hx, hy, r, r, FUR) // head
   blob(hx, hy + r * 0.32, r * 0.46, r * 0.36, TAN) // muzzle
   blob(hx, hy + r * 0.12, r * 0.14, r * 0.1, OUT) // nose
-  const shut = mood === 'sleep' || now % 3400 < 120
+  const shut = mood === 'sleep' || now % 3400 < 120, gaze = pl.gaze || mascotGaze
   for (const d of [-1, 1]) {
     const ex = hx + d * r * 0.4, ey = hy - r * 0.2, er = r * (mood === 'wow' ? 0.27 : 0.2)
     if (shut) { c.strokeStyle = OUT; c.lineWidth = 5; c.beginPath(); c.moveTo(ex - er, ey); c.lineTo(ex + er, ey); c.stroke(); continue }
@@ -337,21 +468,35 @@ function drawAvatar(now) {
   else { c.arc(hx, my - r * 0.14, r * 0.18, Math.PI * 0.15, Math.PI * 0.85); c.stroke() }
   for (const i of [5, 6]) blob(P[i].x, P[i].y, w * 0.68, w * 0.68, '#fff') // mitten hands
   c.restore()
-  ctx.globalAlpha = mode === 'letters' ? 0.72 : 0.55; ctx.drawImage(avCv, 0, 0); ctx.globalAlpha = 1
+  ctx.globalAlpha = scene === 'menu' ? 0.55 : mode === 'trace' ? 0.72 : 0.55; ctx.drawImage(avCv, 0, 0); ctx.globalAlpha = 1
 }
 
+// A pose message carries every person the phone can see: ps = [{k: [L wrist, R wrist, L hip, R hip] (+z), b: body points}]
+// People are matched to players by where they stand: in 2-player mode the left half of the room is player 1.
 function onPose(m) {
-  const k = m.k, now = performance.now(); lastPoseAt = now
+  const now = performance.now(); lastPoseAt = now
   if (sessionOver) return
-  body = layoutBody(m)
-  const wristPx = body ? [body.pts[5], body.pts[6]].map((p) => [p.x, p.y]) : [[(1 - k[0][0]) * W, k[0][1] * H], [(1 - k[1][0]) * W, k[1][1] * H]]
-  const hi = wristPx[0][1] < wristPx[1][1] ? 0 : 1; gaze.x = wristPx[hi][0]; gaze.y = wristPx[hi][1] // mascot watches the raised hand
-  if (Math.min(k[0][2] ?? 0, k[1][2] ?? 0) < CONFIG.closeZ) { // hand reaching toward the camera
-    if (now > closeUntil + 1500) { sfx.boop(); pop('Whoa!', W - 150, H - 200) }
-    closeUntil = now + 300
+  const ar = m.ar || 4 / 3, list = (m.ps || [{ k: m.k, b: m.b }]).filter((p) => p.b)
+  if (!list.length) return
+  const scr = list.map((p) => ({ p, x: 1 - (p.b[1][0] + p.b[2][0]) / 2 })) // scene x (mirrored) of each person's shoulders
+  let slots
+  if (wantPoses() === 1) slots = [{ p: scr.sort((a, b) => Math.abs(a.x - 0.5) - Math.abs(b.x - 0.5))[0].p, i: 0 }] // one player: whoever is most central
+  else if (scr.length >= 2) { scr.sort((a, b) => a.x - b.x); slots = [{ p: scr[0].p, i: 0 }, { p: scr[1].p, i: 1 }] }
+  else slots = [{ p: scr[0].p, i: scr[0].x < 0.5 ? 0 : 1 }]
+  for (const { p, i } of slots) {
+    const pl = PL[i]; pl.lastPoseAt = now
+    pl.body = layoutBody(pl, p.b, ar)
+    const wristPx = [pl.body.pts[5], pl.body.pts[6]].map((q) => [q.x, q.y])
+    const hi = wristPx[0][1] < wristPx[1][1] ? 0 : 1; pl.gaze = { x: wristPx[hi][0], y: wristPx[hi][1] } // eyes follow the raised hand
+    if (i === 0) { mascotGaze.x = pl.gaze.x; mascotGaze.y = pl.gaze.y }
+    if (Math.min(p.k[0][2] ?? 0, p.k[1][2] ?? 0) < CONFIG.closeZ) { // hand reaching toward the camera
+      if (i === 0 && now > closeUntil + 1500) { sfx.boop(); pop('Whoa!', W - 150, H - 200) }
+      closeUntil = now + 300
+    }
+    if (scene === 'menu') pl.ptr = { x: wristPx[hi][0], y: wristPx[hi][1], t: now }
+    else if (mode === 'trace') onWrists(pl, wristPx)
+    else if (i === 0) onHips(p.k)
   }
-  if (mode === 'letters') onWrists(wristPx)
-  else onHips(k)
 }
 
 // ---- Game 2: Jump Dodge (hip height vs. a slowly-adapting standing baseline) ----
@@ -378,7 +523,7 @@ function drawJump(now) {
   if (!jump.over) {
     if (now > jump.nextSpawn) {
       jump.obstacles.push({ x: W + obW, hit: false, passed: false })
-      jump.nextSpawn = now + (0.45 + Math.random() * 0.35) / CONFIG.jumpSpeed * 1000 // gap of 0.45-0.8 screen widths
+      jump.nextSpawn = now + (0.45 + Math.random() * 0.35) / CONFIG.jumpSpeed * 1000 // gap of 0.45-0.8 scene widths
     }
     for (const o of jump.obstacles) {
       o.x -= W * CONFIG.jumpSpeed * dt
@@ -412,51 +557,91 @@ function drawJump(now) {
   if (jump.over) { ctx.font = '900 96px system-ui'; ctx.textAlign = 'center'; ctx.fillText(`Great job! Score ${jump.score}`, W / 2, H * 0.42) }
 }
 
-// ---- Dev controls ----
+// ---- Keyboard ----
 addEventListener('keydown', (e) => {
+  const num = '123456'.indexOf(e.key)
   if (e.key === 'Enter' && sessionOver) startSession()
-  else if (e.key === 'm' || e.key === 'M') { muted = !muted; syncMenu() }
+  else if (e.key === 'Escape') showMenu()
+  else if (e.key === 'm' || e.key === 'M') { muted = !muted; syncBar() }
+  else if (e.key === 'p' || e.key === 'P') setPlayers(nPlayers === 1 ? 2 : 1)
   else if (e.key === '[' || e.key === ']') CONFIG.reach = Math.max(0.2, CONFIG.reach + (e.key === ']' ? 0.05 : -0.05))
-  else if (e.key === '1') setMode('letters')
-  else if (e.key === '2') setMode('jump')
+  else if (num >= 0) startGame(num === 5 ? 'jump' : 'trace', MENU_SETS[num])
   else if (e.key === ' ') jump.fakeAt = performance.now()
-  else if (mode === 'jump') {
+  else if (scene === 'play' && mode === 'jump') {
     if (e.key === 'ArrowUp') CONFIG.jumpThreshold += 0.01
     else if (e.key === 'ArrowDown') CONFIG.jumpThreshold = Math.max(0.01, CONFIG.jumpThreshold - 0.01)
   }
-  else if (e.key === 'ArrowRight') loadLetter(idx + 1)
-  else if (e.key === 'ArrowLeft') loadLetter(idx - 1)
-  else if (e.key === 'ArrowUp') CONFIG.threshold = Math.min(1, CONFIG.threshold + 0.05)
-  else if (e.key === 'ArrowDown') CONFIG.threshold = Math.max(0.1, CONFIG.threshold - 0.05)
+  else if (scene === 'play') {
+    if (e.key === 'ArrowRight') loadChar(idx + 1)
+    else if (e.key === 'ArrowLeft') loadChar(idx - 1)
+    else if (e.key === 'ArrowUp') CONFIG.threshold = Math.min(1, CONFIG.threshold + 0.05)
+    else if (e.key === 'ArrowDown') CONFIG.threshold = Math.max(0.1, CONFIG.threshold - 0.05)
+  }
 })
-if (CONFIG.mouse) addEventListener('mousemove', (e) => onWrists([[e.clientX, e.clientY], null]))
+if (CONFIG.mouse) addEventListener('mousemove', (e) => { if (scene === 'play' && mode === 'trace') onWrists(PL[0], [[e.clientX, e.clientY], null]) })
 
 // ---- Render ----
-function drawLetters(now) {
-  ctx.font = FONT(); ctx.textAlign = 'center'
-  ctx.fillStyle = `rgba(255,255,255,${bgImg ? 0.25 : 0.10})`; ctx.fillText(CONFIG.letters[idx], W / 2, glyphY) // ghost letter
-  ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 5; ctx.lineJoin = 'round'; ctx.strokeText(CONFIG.letters[idx], W / 2, glyphY) // outline stays visible over the avatar
-  ctx.fillStyle = `hsl(${hue} 90% 60%)`
-  for (const s of samples) if (s.on) ctx.fillRect(s.x - step / 2, s.y - step / 2, step + 1, step + 1)
+function drawTrace(pl, now) {
+  const size = pl.size, gw = 0.11 * size, cs = pl.strokes[pl.cur], strokes = pl.strokes, cur = pl.cur
+  ctx.lineCap = ctx.lineJoin = 'round'
+  // 1. guide lanes: the whole character as faint thick lines (current stroke brightest)
+  strokes.forEach((st, i) => {
+    tracePath(st, 0, st.len); ctx.strokeStyle = `rgba(255,255,255,${i < cur ? 0.06 : i === cur ? 0.24 : 0.1})`; ctx.lineWidth = gw; ctx.stroke()
+  })
+  // 2. paint: exactly the part of each stroke you have traced
+  ctx.shadowBlur = 20; ctx.shadowColor = `hsl(${hue} 90% 60%)`; ctx.strokeStyle = `hsl(${hue} 90% 60%)`; ctx.lineWidth = gw * 0.85
+  for (const st of strokes) if (st.d > 0) { tracePath(st, 0, st.d); ctx.stroke() }
+  ctx.shadowBlur = 0
+  // 3. direction: marching dashes + chevrons flowing along what is left of the current stroke
+  if (cs && !won && !pl.done) {
+    tracePath(cs, cs.d, cs.len); ctx.setLineDash([14, 20]); ctx.lineDashOffset = -now / 25; ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = 4; ctx.stroke(); ctx.setLineDash([])
+    for (let k = 0; k < 3; k++) {
+      const t = (now / 1800 + k / 3) % 1, q = pointAt(cs, cs.d + t * (cs.len - cs.d)), a = 0.2 + 0.8 * Math.sin(Math.PI * t), r = gw * 0.34
+      ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(q.ang); ctx.fillStyle = `rgba(255,255,255,${a})`
+      ctx.beginPath(); ctx.moveTo(r, 0); ctx.lineTo(-r * 0.7, -r * 0.8); ctx.lineTo(-r * 0.7, r * 0.8); ctx.fill(); ctx.restore()
+    }
+  }
+  // 4. numbered start dots for strokes still to do; the current one pulses
+  ctx.font = `800 ${gw * 0.5}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  strokes.forEach((st, i) => {
+    if (i < cur || (i === cur && st.d > 0)) return
+    const s0 = st.pts[0], pulse = i === cur ? 1 + Math.sin(now / 180) * 0.12 : 0.8, r = gw * 0.42 * pulse
+    ctx.fillStyle = i === cur ? '#ffd23f' : 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.arc(s0.x, s0.y, r, 0, 7); ctx.fill()
+    ctx.fillStyle = '#111'; ctx.fillText(i + 1, s0.x, s0.y + 2)
+    if (i === cur) { ctx.strokeStyle = `rgba(255,210,63,${0.6 - Math.sin(now / 180) * 0.3})`; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(s0.x, s0.y, r * 1.5, 0, 7); ctx.stroke() }
+  })
+  ctx.textBaseline = 'alphabetic'
+  if (nPlayers === 2) { ctx.font = '700 34px system-ui'; ctx.fillStyle = PALETTE[pl.i].shirt; ctx.fillText(`Player ${pl.i + 1}` + (pl.done && !won ? '  ✓' : ''), pl.cx, H * 0.115) }
 
-  ctx.lineCap = 'round'; ctx.lineWidth = 16; ctx.shadowBlur = 24; ctx.shadowColor = '#fff'
-  while (trail.length && now - trail[0].t > 1500) trail.shift()
-  for (let i = 1; i < trail.length; i++) {
-    if (trail[i].brk) continue
-    ctx.globalAlpha = 1 - (now - trail[i].t) / 1500
-    ctx.strokeStyle = `hsl(${(hue + 180) % 360} 100% 75%)`
-    ctx.beginPath(); ctx.moveTo(trail[i - 1].x, trail[i - 1].y); ctx.lineTo(trail[i].x, trail[i].y); ctx.stroke()
+  // your hand trail + hand dot
+  ctx.lineWidth = 12; ctx.shadowBlur = 20; ctx.shadowColor = '#fff'
+  while (pl.trail.length && now - pl.trail[0].t > 1200) pl.trail.shift()
+  for (let i = 1; i < pl.trail.length; i++) {
+    if (pl.trail[i].brk) continue
+    ctx.globalAlpha = 0.7 * (1 - (now - pl.trail[i].t) / 1200)
+    ctx.strokeStyle = `hsl(${(hue + 180) % 360} 100% 80%)`
+    ctx.beginPath(); ctx.moveTo(pl.trail[i - 1].x, pl.trail[i - 1].y); ctx.lineTo(pl.trail[i].x, pl.trail[i].y); ctx.stroke()
   }
   ctx.globalAlpha = 1
-  const head = hist[dom][hist[dom].length - 1]
-  if (head && !won) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(head.x, head.y, 20, 0, 7); ctx.fill() }
+  const head = pl.hist[pl.dom][pl.hist[pl.dom].length - 1]
+  if (head && !won && now - pl.lastPoseAt < 1000) { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(head.x, head.y, 18, 0, 7); ctx.fill() }
   ctx.shadowBlur = 0
 
-  // progress bar with threshold marker (for tuning)
-  const pct = samples.length ? covered / samples.length : 0, bw = W * 0.5, bx = (W - bw) / 2, by = H - 28
-  ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(bx, by, bw, 12)
-  ctx.fillStyle = `hsl(${hue} 90% 60%)`; ctx.fillRect(bx, by, bw * pct, 12)
-  ctx.fillStyle = '#fff'; ctx.fillRect(bx + bw * CONFIG.threshold - 2, by - 4, 4, 20)
+  // overall progress bar (one under each letter)
+  const total = strokes.reduce((a, st) => a + st.len, 0) || 1, done = strokes.reduce((a, st) => a + st.d, 0)
+  const bw = nPlayers === 2 ? W * 0.3 : W * 0.5, bx = pl.cx - bw / 2, by = H - 24
+  ctx.fillStyle = 'rgba(255,255,255,.15)'; ctx.fillRect(bx, by, bw, 10)
+  ctx.fillStyle = `hsl(${hue} 90% 60%)`; ctx.fillRect(bx, by, bw * done / total, 10)
+}
+function drawTraceScreen(now) {
+  if (nPlayers === 2) { ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(W / 2, H * 0.1); ctx.lineTo(W / 2, H * 0.9); ctx.stroke() }
+  active().forEach((pl) => drawTrace(pl, now))
+  const first = PL[0].strokes[0]
+  if (first && active().every((pl) => pl.cur === 0 && pl.strokes[0] && pl.strokes[0].d === 0) && !won) { // first-time hint
+    ctx.font = '600 34px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.fillText('Start at the yellow 1, then follow the arrows!', W / 2, H - 50)
+  }
+  const ch = chars()[idx], say = typeof KANA_ROMAJI !== 'undefined' && KANA_ROMAJI[ch]
+  if (say) { ctx.font = '700 64px system-ui'; ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fillText(say, 30, H - 60) } // how to say it
 }
 
 let lastFrame = performance.now()
@@ -467,8 +652,10 @@ function draw() {
   const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now
   if (sessionOver) drawSessionOver(now)
   else {
-    if (now - lastPoseAt < 1500) drawAvatar(now)
-    mode === 'letters' ? drawLetters(now) : drawJump(now)
+    for (const pl of active()) if (now - pl.lastPoseAt < 1500) drawAvatar(pl, now)
+    if (scene === 'menu') drawMenu(now, dt)
+    else if (mode === 'trace') drawTraceScreen(now)
+    else drawJump(now)
     if (now - lastPoseAt > 2500 && now > 4000) { // nobody in view
       ctx.font = '600 40px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,' + (0.6 + Math.sin(now / 300) * 0.3) + ')'
       ctx.fillText('Step back so the phone can see you!', W / 2, H - 70)
@@ -489,7 +676,7 @@ function draw() {
 let tvOff = null, phoneOff = null, lat = [], msgs = 0, last = performance.now()
 const sync = () => ws.send(JSON.stringify({ type: 'sync', t0: Date.now() })) // clock offset = serverTime - localTime
 const ws = new WebSocket(`wss://${location.host}/?role=tv`)
-ws.onopen = () => { hud.textContent = 'connected, waiting for phone…'; sync(); setInterval(sync, 2000) }
+ws.onopen = () => { hud.textContent = 'connected, waiting for phone…'; sync(); setInterval(() => { sync(); sendConfig() }, 2000); sendConfig() }
 ws.onclose = () => hud.textContent = 'disconnected'
 ws.onmessage = (e) => {
   const m = JSON.parse(e.data)
@@ -501,7 +688,6 @@ ws.onmessage = (e) => {
   else if (m.type === 'theme_error') themeError(m.theme)
   else if (m.type === 'kp') {
     msgs++
-    // k = [L wrist, R wrist, L hip, R hip], normalised; x mirrored so it acts like a mirror
     onPose(m)
     if (tvOff !== null && phoneOff !== null) { lat.push((Date.now() + tvOff) - (m.t + phoneOff)); if (lat.length > 60) lat.shift() }
   }
@@ -509,10 +695,15 @@ ws.onmessage = (e) => {
 setInterval(() => {
   const now = performance.now(), fps = msgs / ((now - last) / 1000); msgs = 0; last = now
   const avg = lat.length ? (lat.reduce((a, b) => a + b) / lat.length).toFixed(0) + 'ms' : '…'
-  const info = mode === 'letters' ? `${CONFIG.letters[idx]}  ${(100 * covered / Math.max(1, samples.length)).toFixed(0)}% / ${(CONFIG.threshold * 100).toFixed(0)}%`
+  const pl = PL[0], st = pl.strokes[pl.cur]
+  const info = scene === 'menu' ? 'menu' : mode === 'trace' ? `${chars()[idx]}  stroke ${Math.min(pl.cur + 1, pl.strokes.length)}/${pl.strokes.length}  ${st ? (100 * st.d / st.len).toFixed(0) : 100}% (need ${(CONFIG.threshold * 100).toFixed(0)}%)`
     : `jump size ${CONFIG.jumpThreshold.toFixed(2)}  rise ${Math.max(0, jump.rise).toFixed(3)}`
   hud.textContent = `${info}   session ${(playMs / 60000).toFixed(1)}/${CONFIG.sessionMin}m   latency ${avg}   ${fps.toFixed(0)}/s`
 }, 500)
 
-addEventListener('resize', resize); resize(); syncMenu(); if (mode === 'jump') jumpReset(); draw()
+addEventListener('resize', resize)
+const startSet = SETS[CONFIG.set] ? CONFIG.set : 'upper'
+resize(); syncBar(); jumpReset()
+if (CONFIG.game === 'jump') startGame('jump'); else if (CONFIG.game === 'trace' || CONFIG.game === 'letters' || SETS[CONFIG.set]) startGame('trace', startSet)
+draw()
 </script>

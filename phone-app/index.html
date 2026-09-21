@@ -4,11 +4,22 @@
 <title>Phone — Kids Motion Game</title>
 <style>
   body{margin:0;font:14px system-ui;background:#000;color:#0f0}
-  button{font:600 18px system-ui;padding:10px 16px}
+  button{font:600 16px system-ui;padding:9px 12px}
   video{width:100vw;transform:scaleX(-1)} pre{margin:8px}
 </style>
 <video id="v" playsinline muted></video>
-<div style="display:flex;gap:8px;padding:8px"><button data-g="letters">✏️ Letters</button><button data-g="jump">🦘 Jump</button></div>
+<div id="remote" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px">
+  <button data-c='{"name":"show_menu"}'>🏠 Menu</button>
+  <button data-c='{"name":"switch_game","input":{"name":"upper"}}'>ABC</button>
+  <button data-c='{"name":"switch_game","input":{"name":"lower"}}'>abc</button>
+  <button data-c='{"name":"switch_game","input":{"name":"digits"}}'>123</button>
+  <button data-c='{"name":"switch_game","input":{"name":"hiragana"}}'>あ</button>
+  <button data-c='{"name":"switch_game","input":{"name":"katakana"}}'>ア</button>
+  <button data-c='{"name":"switch_game","input":{"name":"jump"}}'>🦘 Jump</button>
+  <button data-c='{"name":"set_players","input":{"players":1}}'>1P</button>
+  <button data-c='{"name":"set_players","input":{"players":2}}'>2P</button>
+  <button data-c='{"name":"next_letter"}'>⏭</button>
+</div>
 <div id="ver" style="position:fixed;right:10px;bottom:8px;color:#0f0;opacity:.6;font:13px monospace"></div>
 <pre id="log">starting…</pre>
 <pre id="voice">voice: starting…</pre>
@@ -23,6 +34,8 @@ const KEYS = [15, 16, 23, 24] // L wrist, R wrist, L hip, R hip
 const BODY = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
 
 const ws = new WebSocket(`wss://${location.host}/?role=phone`)
+let wantPoses = 1 // how many people the TV wants tracked (1 or 2); set by the TV via the server
+ws.addEventListener('message', (e) => { const m = JSON.parse(e.data); if (m.type === 'config') wantPoses = m.players === 2 ? 2 : 1 })
 await new Promise((r) => ws.onopen = r)
 
 video.srcObject = await navigator.mediaDevices.getUserMedia({
@@ -36,18 +49,21 @@ const pose = await PoseLandmarker.createFromOptions(fileset, {
     delegate: 'GPU' },
   runningMode: 'VIDEO', numPoses: 1 })
 
-let frames = 0, last = performance.now(), inf = 0
+let frames = 0, last = performance.now(), inf = 0, appliedPoses = 1
 function tick() {
+  if (appliedPoses !== wantPoses) { pose.setOptions({ numPoses: wantPoses }); appliedPoses = wantPoses } // 2 people costs more inference, so only when asked
   const t = Date.now() // stamped before inference so TV latency includes detection time
   const t0 = performance.now()
   const r = pose.detectForVideo(video, t0)
   inf = performance.now() - t0
   const lm = r.landmarks[0]
-  if (lm && ws.readyState === 1) ws.send(JSON.stringify({ type: 'kp', t, k: KEYS.map((i) => [lm[i].x, lm[i].y, +lm[i].z.toFixed(3)]),
-    b: BODY.map((i) => [+lm[i].x.toFixed(3), +lm[i].y.toFixed(3)]), ar: +(video.videoWidth / video.videoHeight).toFixed(3) }))
+  if (lm && ws.readyState === 1) {
+    const ps = r.landmarks.map((l) => ({ k: KEYS.map((i) => [l[i].x, l[i].y, +l[i].z.toFixed(3)]), b: BODY.map((i) => [+l[i].x.toFixed(3), +l[i].y.toFixed(3)]) }))
+    ws.send(JSON.stringify({ type: 'kp', t, ar: +(video.videoWidth / video.videoHeight).toFixed(3), ps, k: ps[0].k, b: ps[0].b })) // k/b = first person, for older TV pages
+  }
   frames++
   if (performance.now() - last > 1000) {
-    log(`fps ${frames}\ninference ${inf.toFixed(1)}ms\n${lm ? 'tracking' : 'no pose'}`)
+    log(`fps ${frames}\ninference ${inf.toFixed(1)}ms\n${lm ? 'tracking ' + r.landmarks.length + ' person(s)' : 'no pose'}`)
     frames = 0; last = performance.now()
   }
   video.requestVideoFrameCallback(tick)
@@ -67,8 +83,8 @@ ws.onmessage = (e) => {
 setInterval(sync, 2000); sync()
 
 // Game menu: buttons send the same command voice does; the server relays phone messages to the TV unchanged.
-document.querySelectorAll('button[data-g]').forEach((b) => b.onclick = () =>
-  ws.send(JSON.stringify({ type: 'game_command', name: 'switch_game', input: { name: b.dataset.g } })))
+document.querySelectorAll('button[data-c]').forEach((b) => b.onclick = () =>
+  ws.send(JSON.stringify({ type: 'game_command', ...JSON.parse(b.dataset.c) })))
 
 // Voice: continuous browser speech recognition; each finished phrase goes to the server as a voice_command.
 const voiceLog = document.getElementById('voice')

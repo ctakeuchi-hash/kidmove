@@ -44,13 +44,20 @@ const server = createServer({ key: readFileSync(key), cert: readFileSync(cert) }
 const wss = new WebSocketServer({ server })
 
 // ponytail: role comes from ?role=phone|tv; phone messages are forwarded verbatim to every TV. No rooms until >1 phone.
+let config = null // last {type:'config', players} sent by a TV: how many people the phone should track
 wss.on('connection', (ws, req) => {
   ws.role = new URL(req.url, 'http://x').searchParams.get('role')
+  if (ws.role === 'phone' && config) ws.send(config)
   ws.on('message', (data, isBinary) => {
     // Clock sync: reply with server time so each client can compute its offset (phone/TV clocks differ).
     if (!isBinary) {
       const m = data.toString()
       if (m.startsWith('{"type":"sync"')) return ws.send(JSON.stringify({ ...JSON.parse(m), s: Date.now() }))
+    }
+    if (ws.role === 'tv' && !isBinary && data.toString().startsWith('{"type":"config"')) {
+      config = data.toString()
+      for (const c of wss.clients) if (c.role === 'phone' && c.readyState === 1) c.send(config)
+      return
     }
     if (ws.role !== 'phone') return
     // Voice: turn the transcript into a structured command for the TVs; the phone gets the result back for display.
