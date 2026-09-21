@@ -5,6 +5,7 @@ import { networkInterfaces } from 'node:os'
 import express from 'express'
 import { WebSocketServer } from 'ws'
 import { interpret } from './voice.js'
+import { getThemeImage, CACHE_DIR } from './images.js'
 
 const PORT = process.env.PORT || 3000
 const lanIp = Object.values(networkInterfaces()).flat()
@@ -20,10 +21,22 @@ if (!existsSync(cert)) {
 
 const app = express()
 app.use(express.json({ limit: '4kb' }))
+app.use('/theme-assets', express.static(CACHE_DIR))
+app.post('/api/theme', async (req, res) => {
+  try { res.json(await getThemeImage(req.body?.theme ?? '')) } catch (e) { res.status(502).json({ error: e.message }) }
+})
 app.post('/api/voice', async (req, res) => res.json({ command: await interpret(req.body?.transcript ?? '') }))
 app.use('/phone', express.static(new URL('../phone-app', import.meta.url).pathname))
 app.use('/tv', express.static(new URL('../tv-app', import.meta.url).pathname))
 app.get('/', (_req, res) => res.send('<a href="/phone">phone-app</a> · <a href="/tv">tv-app</a>'))
+
+const toTVs = (msg) => { for (const c of wss.clients) if (c.role === 'tv' && c.readyState === 1) c.send(JSON.stringify(msg)) }
+// Theme change: tell TVs to show a loading state, generate (or fetch from cache), then push the asset.
+async function applyTheme(theme) {
+  toTVs({ type: 'theme_loading', theme })
+  try { toTVs({ type: 'theme_asset', ...(await getThemeImage(theme)) }) }
+  catch (e) { console.error('theme failed:', e.message); toTVs({ type: 'theme_error', theme }) }
+}
 
 const server = createServer({ key: readFileSync(key), cert: readFileSync(cert) }, app)
 const wss = new WebSocketServer({ server })
@@ -43,8 +56,8 @@ wss.on('connection', (ws, req) => {
       let text; try { text = JSON.parse(data.toString()).text } catch { return }
       return interpret(text).then((command) => {
         ws.send(JSON.stringify({ type: 'voice_result', text, command }))
-        if (command) for (const c of wss.clients) if (c.role === 'tv' && c.readyState === 1)
-          c.send(JSON.stringify({ type: 'game_command', name: command.name, input: command.input }))
+        if (command?.name === 'change_theme') applyTheme(command.input.theme)
+        else if (command) toTVs({ type: 'game_command', name: command.name, input: command.input })
       })
     }
     for (const c of wss.clients) if (c.role === 'tv' && c.readyState === 1) c.send(data, { binary: isBinary })
