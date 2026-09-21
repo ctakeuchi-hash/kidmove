@@ -17,6 +17,8 @@ import { PoseLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@m
 const log = (s) => document.getElementById('log').textContent = s
 const video = document.getElementById('v')
 const KEYS = [15, 16, 23, 24] // L wrist, R wrist, L hip, R hip
+// Full upper/lower body for the TV avatar: nose, shoulders, elbows, wrists, hips, knees, ankles
+const BODY = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]
 
 const ws = new WebSocket(`wss://${location.host}/?role=phone`)
 await new Promise((r) => ws.onopen = r)
@@ -39,7 +41,8 @@ function tick() {
   const r = pose.detectForVideo(video, t0)
   inf = performance.now() - t0
   const lm = r.landmarks[0]
-  if (lm && ws.readyState === 1) ws.send(JSON.stringify({ type: 'kp', t, k: KEYS.map((i) => [lm[i].x, lm[i].y, +lm[i].z.toFixed(3)]) }))
+  if (lm && ws.readyState === 1) ws.send(JSON.stringify({ type: 'kp', t, k: KEYS.map((i) => [lm[i].x, lm[i].y, +lm[i].z.toFixed(3)]),
+    b: BODY.map((i) => [+lm[i].x.toFixed(3), +lm[i].y.toFixed(3)]), ar: +(video.videoWidth / video.videoHeight).toFixed(3) }))
   frames++
   if (performance.now() - last > 1000) {
     log(`fps ${frames}\ninference ${inf.toFixed(1)}ms\n${lm ? 'tracking' : 'no pose'}`)

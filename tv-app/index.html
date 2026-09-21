@@ -16,7 +16,7 @@
 <script>
 // ---- Config: override any of these via URL, e.g. /tv/?threshold=0.6&brush=0.12&mouse=1 ----
 // Live tuning: ArrowUp/Down = threshold ±5% (Jump: jump size ±0.01), ArrowRight/Left = next/prev letter.
-// Modes: keys 1 / 2, the buttons top-right, the phone's buttons, or voice ("play jump dodge"). Space = fake jump (testing).
+// Modes: keys 1 / 2, the buttons top-right, the phone's buttons, or voice ("play jump dodge"). Space = fake jump (testing). [ and ] = shrink/grow how far your arms reach.
 const CONFIG = {
   threshold: 0.7,   // fraction of the letter that must be covered to pass
   brush: 0.09,      // brush radius as a fraction of letter height (bigger = more forgiving)
@@ -26,10 +26,12 @@ const CONFIG = {
   jumpSpeed: 0.3,      // Jump Dodge: obstacle speed, screen widths per second
   sessionMin: 15,      // minutes of active play before the break screen
   closeZ: -0.5,        // wrist depth (MediaPipe z, smaller = nearer the camera) that makes the mascot gasp
+  reach: 0.5,          // Letters: torso lengths of screen height per torso length of arm movement (bigger = smaller movements needed)
+  mapping: 'body',     // Letters: 'body' = hands measured from your shoulders (avatar fixed on screen); 'camera' = raw camera position
   game: 'letters',     // start mode: letters | jump
   mouse: 0,         // 1 = use the mouse as the wrist (test without a phone)
 }
-for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = k === 'letters' || k === 'game' ? v : +v
+for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = k === 'letters' || k === 'game' || k === 'mapping' ? v : +v
 
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), hud = document.getElementById('hud')
 let W, H, size
@@ -144,6 +146,12 @@ function celebrate(n) { // confetti + chime + happy mascot, shared by both games
   for (let i = 0; i < n; i++) confetti.push({ x: W / 2, y: H / 2, vx: (Math.random() - .5) * 26, vy: -Math.random() * 22 - 4,
     r: Math.random() * 6.28, vr: (Math.random() - .5) * .4, c: `hsl(${Math.random() * 360} 90% 60%)`, s: 8 + Math.random() * 10 })
   sfx.chime(); cheer(2500)
+}
+function win() {
+  won = true
+  for (const s of samples) s.on = true // letter fills with colour
+  celebrate(180)
+  winTimer = setTimeout(() => loadLetter(idx + 1), CONFIG.pauseMs)
 }
 function drawFx(dt) {
   for (const f of fx) {
@@ -269,9 +277,46 @@ const syncMenu = () => {
 }
 document.getElementById('snd').onclick = () => { if (actx && actx.state === 'running') { muted = !muted; syncMenu() } }
 document.querySelectorAll('#menu button[data-g]').forEach((b) => b.onclick = () => setMode(b.dataset.g))
-function onPose(k, wristPx) { // k = [L wrist, R wrist, L hip, R hip], normalised; entries may carry z as a third value
-  const now = performance.now(); lastPoseAt = now
+// ---- Body avatar. b = [nose, L/R shoulder, L/R elbow, L/R wrist, L/R hip, L/R knee, L/R ankle], normalised camera coords ----
+// 'body' mapping: your shoulders are pinned to a fixed spot on screen and everything is measured from them in torso lengths,
+// so it works for any height / distance from the phone, and ordinary arm movement covers the whole letter.
+// 'camera' mapping: raw mirrored camera position (used for Jump Dodge so you can see yourself jump).
+let body = null, torsoLen = null
+function layoutBody(m) {
+  if (!m.b) return null
+  const b = m.b, ar = m.ar || 4 / 3
+  const sx = (b[1][0] + b[2][0]) / 2, sy = (b[1][1] + b[2][1]) / 2, hx = (b[7][0] + b[8][0]) / 2, hy = (b[7][1] + b[8][1]) / 2
+  const tl = Math.hypot((sx - hx) * ar, sy - hy)
+  if (tl > 0.04) torsoLen = torsoLen ? torsoLen * 0.9 + tl * 0.1 : tl
+  const useBody = mode === 'letters' && CONFIG.mapping === 'body' && torsoLen
+  const s = useBody ? CONFIG.reach * H / torsoLen : 0
+  const pts = b.map(([x, y], i) => {
+    const t = useBody ? { x: W / 2 + (sx - x) * ar * s, y: H * 0.6 + (y - sy) * s } : { x: (1 - x) * W, y: y * H }
+    const o = body && body.pts[i]; return o ? { x: o.x * 0.4 + t.x * 0.6, y: o.y * 0.4 + t.y * 0.6 } : t // light smoothing
+  })
+  return { pts, kind: useBody ? 'body' : 'camera' }
+}
+function drawAvatar() {
+  if (!body) return
+  const P = body.pts, w = H * 0.06, col = 'hsl(205 80% 65%)'
+  ctx.save(); ctx.globalAlpha = mode === 'letters' ? 0.38 : 0.3
+  ctx.strokeStyle = ctx.fillStyle = col; ctx.lineWidth = w; ctx.lineCap = ctx.lineJoin = 'round'
+  const line = (...ix) => { ctx.beginPath(); ix.forEach((i, n) => n ? ctx.lineTo(P[i].x, P[i].y) : ctx.moveTo(P[i].x, P[i].y)); ctx.stroke() }
+  ctx.beginPath(); for (const i of [1, 2, 8, 7]) ctx.lineTo(P[i].x, P[i].y); ctx.closePath(); ctx.fill(); ctx.stroke() // torso
+  line(1, 3, 5); line(2, 4, 6) // arms
+  if (body.kind === 'camera') { line(7, 9, 11); line(8, 10, 12) } // legs (Jump Dodge)
+  const sw = Math.hypot(P[1].x - P[2].x, P[1].y - P[2].y)
+  ctx.beginPath(); ctx.arc(P[0].x, P[0].y, Math.max(22, sw * 0.3), 0, 7); ctx.fill() // head
+  ctx.globalAlpha = 0.9; ctx.fillStyle = 'hsl(205 95% 78%)' // hands
+  for (const i of [5, 6]) { ctx.beginPath(); ctx.arc(P[i].x, P[i].y, w * 0.7, 0, 7); ctx.fill() }
+  ctx.restore()
+}
+
+function onPose(m) {
+  const k = m.k, now = performance.now(); lastPoseAt = now
   if (sessionOver) return
+  body = layoutBody(m)
+  const wristPx = body ? [body.pts[5], body.pts[6]].map((p) => [p.x, p.y]) : [[(1 - k[0][0]) * W, k[0][1] * H], [(1 - k[1][0]) * W, k[1][1] * H]]
   const hi = wristPx[0][1] < wristPx[1][1] ? 0 : 1; gaze.x = wristPx[hi][0]; gaze.y = wristPx[hi][1] // mascot watches the raised hand
   if (Math.min(k[0][2] ?? 0, k[1][2] ?? 0) < CONFIG.closeZ) { // hand reaching toward the camera
     if (now > closeUntil + 1500) { sfx.boop(); pop('Whoa!', W - 150, H - 200) }
@@ -343,6 +388,7 @@ function drawJump(now) {
 addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && sessionOver) startSession()
   else if (e.key === 'm' || e.key === 'M') { muted = !muted; syncMenu() }
+  else if (e.key === '[' || e.key === ']') CONFIG.reach = Math.max(0.2, CONFIG.reach + (e.key === ']' ? 0.05 : -0.05))
   else if (e.key === '1') setMode('letters')
   else if (e.key === '2') setMode('jump')
   else if (e.key === ' ') jump.fakeAt = performance.now()
@@ -361,6 +407,7 @@ if (CONFIG.mouse) addEventListener('mousemove', (e) => onWrists([[e.clientX, e.c
 function drawLetters(now) {
   ctx.font = FONT(); ctx.textAlign = 'center'
   ctx.fillStyle = `rgba(255,255,255,${bgImg ? 0.25 : 0.10})`; ctx.fillText(CONFIG.letters[idx], W / 2, glyphY) // ghost letter
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 5; ctx.lineJoin = 'round'; ctx.strokeText(CONFIG.letters[idx], W / 2, glyphY) // outline stays visible over the avatar
   ctx.fillStyle = `hsl(${hue} 90% 60%)`
   for (const s of samples) if (s.on) ctx.fillRect(s.x - step / 2, s.y - step / 2, step + 1, step + 1)
 
@@ -392,7 +439,12 @@ function draw() {
   const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now
   if (sessionOver) drawSessionOver(now)
   else {
+    if (now - lastPoseAt < 1500) drawAvatar()
     mode === 'letters' ? drawLetters(now) : drawJump(now)
+    if (now - lastPoseAt > 2500 && now > 4000) { // nobody in view
+      ctx.font = '600 40px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,' + (0.6 + Math.sin(now / 300) * 0.3) + ')'
+      ctx.fillText('Step back so the phone can see you!', W / 2, H - 70)
+    }
     drawMascot(now, W - Math.min(H * 0.08, 60) * 2, H - 20, Math.min(H * 0.08, 60))
     drawFx(dt)
   }
@@ -422,7 +474,7 @@ ws.onmessage = (e) => {
   else if (m.type === 'kp') {
     msgs++
     // k = [L wrist, R wrist, L hip, R hip], normalised; x mirrored so it acts like a mirror
-    onPose(m.k, [[(1 - m.k[0][0]) * W, m.k[0][1] * H], [(1 - m.k[1][0]) * W, m.k[1][1] * H]])
+    onPose(m)
     if (tvOff !== null && phoneOff !== null) { lat.push((Date.now() + tvOff) - (m.t + phoneOff)); if (lat.length > 60) lat.shift() }
   }
 }
