@@ -46,6 +46,7 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 | Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `Esc` menu, `P` 1/2 players |
 | How much of each stroke is needed | `↑`/`↓` or `?threshold=0.7` |
 | How far your hand may stray from the line | `?brush=0.12` (bigger = more forgiving) |
+| Easier to start a stroke | `?startZone=3` (the glowing circle around the yellow dot; default 2.5), `?resumeZone=2.5` |
 | Prev / next character | `←` / `→` (or the ⏭ button) |
 | Arm reach (bigger = smaller movements) | `[` / `]` or `?reach=0.6` |
 | Jump: how high | `↑`/`↓` in Jump, or `?jumpThreshold=0.04`; speed `?jumpSpeed=0.25` |
