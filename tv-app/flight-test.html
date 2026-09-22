@@ -6,8 +6,10 @@
   html,body{margin:0;height:100%;background:#0b0b1a;overflow:hidden}
   canvas{display:block}
   #hint{position:fixed;top:8px;left:12px;margin:0;color:#9ad;font:14px system-ui;opacity:.85}
+  #score{position:fixed;top:34px;left:12px;margin:0;color:#ffd23f;font:800 24px system-ui;text-shadow:0 1px 5px #000}
 </style>
-<pre id="hint">Stage E: tilt your arms to bank &amp; pitch, flap to gain height (phone required - arrows/WASD/Space still work with no phone connected) - ` toggles the debug overlay - Esc for menu</pre>
+<pre id="hint">Stage E: tilt your arms to bank &amp; pitch, flap to gain height (phone required - arrows/WASD/Space still work with no phone connected) - ` toggles the debug overlay - Esc for menu. Dodge boulders and clear bridges/hills clean for points!</pre>
+<pre id="score">Score: 0</pre>
 <div id="banner" style="display:none;position:fixed;inset:0;align-items:center;justify-content:center;
   flex-direction:column;color:#fff;font:800 56px system-ui;text-shadow:0 2px 12px #000;pointer-events:none"></div>
 <pre id="debug" style="display:none;position:fixed;top:8px;right:12px;margin:0;color:#9f9;font:13px monospace;
@@ -51,8 +53,24 @@ const MAZE = [
   { z: -315, gapX: -6, gapWidth: 9 },                                 // gentle bank left
   { z: -360, gapX: 0, gapWidth: 12 },                                 // straight & wide - finish approach
 ]
+for (const g of MAZE) { g.hit = false; g.scored = false } // runtime state, reset each run in resetFlight(); g.constrained is set below once its rock mass is built
 const FINISH_Z = -400        // past the last gate; crossing this triggers the celebration
 const CELEBRATE_MS = 3000    // how long the celebration plays before looping back to the start
+
+// ---- Obstacles: freestanding boulders to steer around, separate from the MAZE gates - placed off-center
+// with generous clearance to either side (same "easy for young kids" philosophy as MAZE), skipped near the
+// already-trickier climb/dive gates so difficulty doesn't stack. hit/scored are runtime state, reset each
+// run in resetFlight(): hit becomes true on any collision with that boulder; scored fires once, the first
+// time the creature's z passes it, and only awards points if it was never hit. ----
+const OBSTACLES = [
+  { z: -22, x: 5, y: 9, radius: 1.6 },
+  { z: -67, x: -5, y: 11, radius: 1.6 },
+  { z: -112, x: 4, y: 6, radius: 1.5 },
+  { z: -292, x: -4, y: 12, radius: 1.6 },
+  { z: -337, x: 5, y: 7, radius: 1.5 },
+  { z: -380, x: -3, y: 10, radius: 1.7 },
+].map((o) => ({ ...o, hit: false, scored: false }))
+const SCORE_OBSTACLE = 10, SCORE_GATE = 15 // points for a clean dodge / a clean pass through a bridge or hill gate
 
 // ---- Stage B tuning: all easily retunable from here, matching tv-app/index.html's CONFIG convention.
 // Bank/pitch self-level back to 0 when released - forgiving for young kids, same easy-difficulty philosophy
@@ -290,6 +308,17 @@ for (const g of MAZE) {
   // climb/dive gates clear this threshold; straight gates correctly render nothing on the small side.
   if (floorH > 8) addRockMass(g.gapX, g.gapWidth, CORRIDOR_BOTTOM, floorH, g.z) // rocky hill you climb over (climb gates)
   if (ceilingH > 8) addBridge(g.gapX, g.gapWidth, gapY + gapHeight / 2, ceilingH, g.z) // stone bridge you duck under (dive gates)
+  g.constrained = floorH > 8 || ceilingH > 8 // only a real hill/bridge gate is worth scoring - a wide-open straight gate isn't a challenge
+}
+
+// Boulders: low-poly rocks (icosahedra - angular and irregular, not smooth like the mountains, so they read
+// as distinct dodge targets) at each OBSTACLES entry, random rotation for visual variety only.
+const boulderMat = new THREE.MeshStandardMaterial({ color: 0x8a8577, roughness: 0.95 })
+for (const o of OBSTACLES) {
+  const rock = new THREE.Mesh(new THREE.IcosahedronGeometry(o.radius, 0), boulderMat)
+  rock.position.set(o.x, o.y, o.z)
+  rock.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI)
+  scene.add(rock)
 }
 
 // ---- Creature: a horse body with bird wings, built from primitive geometry (boxes/cones/cylinders), same
@@ -346,10 +375,13 @@ scene.add(creature)
 // ---- Flight physics state ----
 let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED, wingRate = 0 // wingRate: 0-1 flap intensity that drives lift; the wing visual is driven separately, see updateWings()
 let finished = false, finishAt = 0
+let score = 0
 
 function resetFlight() {
   creature.position.set(0, CRUISE_Y, 0)
-  bank = pitch = vy = wingRate = 0; speed = MIN_SPEED; finished = false
+  bank = pitch = vy = wingRate = 0; speed = MIN_SPEED; finished = false; score = 0
+  for (const g of MAZE) { g.hit = false; g.scored = false }
+  for (const o of OBSTACLES) { o.hit = false; o.scored = false }
   banner.style.display = 'none'
   for (const p of confetti.splice(0)) scene.remove(p.mesh)
 }
@@ -399,20 +431,51 @@ function stepPhysics(dt) {
   const gate = currentGate()
   if (gate) {
     const halfW = gate.gapWidth / 2 - CREATURE_RADIUS
-    if (creature.position.x > gate.gapX + halfW) { creature.position.x = gate.gapX + halfW; bank = -Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
-    else if (creature.position.x < gate.gapX - halfW) { creature.position.x = gate.gapX - halfW; bank = Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+    if (creature.position.x > gate.gapX + halfW) { creature.position.x = gate.gapX + halfW; bank = -Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING); gate.hit = true }
+    else if (creature.position.x < gate.gapX - halfW) { creature.position.x = gate.gapX - halfW; bank = Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING); gate.hit = true }
     const gapY = gate.gapY ?? CRUISE_Y, gapHeight = gate.gapHeight ?? CORRIDOR_HEIGHT
     if (gapHeight < CORRIDOR_HEIGHT - 0.5) { // only gates with a real vertical constraint can collide on y
       const halfH = gapHeight / 2 - CREATURE_RADIUS
-      if (creature.position.y > gapY + halfH) { creature.position.y = gapY + halfH; vy = Math.min(0, vy); speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
-      else if (creature.position.y < gapY - halfH) { creature.position.y = gapY - halfH; vy = Math.max(0, vy); speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+      if (creature.position.y > gapY + halfH) { creature.position.y = gapY + halfH; vy = Math.min(0, vy); speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING); gate.hit = true }
+      else if (creature.position.y < gapY - halfH) { creature.position.y = gapY - halfH; vy = Math.max(0, vy); speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING); gate.hit = true }
+    }
+  }
+
+  // Obstacle collision: a true 3D sphere-sphere check (unlike the gates' flat AABB walls, these are freestanding
+  // points in open space) - gentle radial push-back + the same brief slow-down as a wall, never a hard stop.
+  for (const o of OBSTACLES) {
+    const dx = creature.position.x - o.x, dy = creature.position.y - o.y, dz = creature.position.z - o.z
+    const minDist = o.radius + CREATURE_RADIUS
+    const distSq = dx * dx + dy * dy + dz * dz
+    if (distSq < minDist * minDist && distSq > 1e-6) {
+      const dist = Math.sqrt(distSq), push = minDist - dist
+      creature.position.x += (dx / dist) * push
+      creature.position.y += (dy / dist) * push
+      speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING)
+      o.hit = true
+    }
+  }
+
+  // Scoring: the first time the creature's z fully clears a constrained gate (a real bridge/hill, not a wide-
+  // open straight one) or an obstacle, award points if it was never hit along the way - dodging cleanly or
+  // threading a gate cleanly, not just eventually getting past it. A small confetti pop marks the moment.
+  for (const g of MAZE) {
+    if (!g.scored && g.constrained && creature.position.z < g.z - GATE_THICKNESS / 2) {
+      g.scored = true
+      if (!g.hit) { score += SCORE_GATE; spawnConfetti(creature.position, 10) }
+    }
+  }
+  for (const o of OBSTACLES) {
+    if (!o.scored && creature.position.z < o.z - o.radius - CREATURE_RADIUS) {
+      o.scored = true
+      if (!o.hit) { score += SCORE_OBSTACLE; spawnConfetti(creature.position, 10) }
     }
   }
 
   // Finish: crossing the end of the maze celebrates, then loops back to the start after a pause.
   if (!finished && creature.position.z < FINISH_Z) {
     finished = true; finishAt = performance.now()
-    banner.textContent = '🎉 You flew the canyon! 🎉'; banner.style.display = 'flex'
+    banner.textContent = `🎉 You flew the canyon! Score ${score} 🎉`; banner.style.display = 'flex'
     spawnConfetti(creature.position)
   }
 }
@@ -434,8 +497,8 @@ function updateWings(now) {
 // ---- Confetti: a handful of small colored boxes that pop out and fall - the 3D equivalent of the 2D
 // games' celebration effects, kept simple (no particle system library, plain meshes + gravity). ----
 const confetti = []
-function spawnConfetti(at) {
-  for (let i = 0; i < 40; i++) {
+function spawnConfetti(at, count = 40) {
+  for (let i = 0; i < count; i++) {
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(0.4, 0.4, 0.4),
       new THREE.MeshStandardMaterial({ color: Math.random() * 0xffffff }),
@@ -474,11 +537,14 @@ function updateDebugOverlay() {
 }
 
 const banner = document.getElementById('banner')
+const scoreEl = document.getElementById('score')
 window.DEBUG = {
   scene, camera, onPose, // onPose exposed so a phone-less test can feed a synthetic body-keypoint array directly
   get creature() { return creature },
   get physics() { return { bank, pitch, speed, vy } },
   get finished() { return finished },
+  get score() { return score },
+  MAZE, OBSTACLES, // exposed for testing - runtime hit/scored state lives on each entry
   get pose() { return { live: poseLive(), poseBank, posePitch, poseFlapRate } },
   get debugVisible() { return debugVisible },
   set debugVisible(v) { debugVisible = !!v; debugEl.style.display = debugVisible ? 'block' : 'none' },
@@ -493,6 +559,7 @@ function tick(now) {
   updateWings(now)
   updateConfetti(dt)
   updateDebugOverlay()
+  scoreEl.textContent = `Score: ${score}`
   camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
   camera.lookAt(creature.position.x, creature.position.y + 0.5, creature.position.z)
   renderer.render(scene, camera)
