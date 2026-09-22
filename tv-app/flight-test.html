@@ -59,6 +59,10 @@ const CELEBRATE_MS = 3000    // how long the celebration plays before looping ba
 // as the rest of the app. Flap is a glide-then-sink model: holding it gains altitude+speed, releasing bleeds
 // both off gradually (never a hard stop). ----
 const MAX_BANK = 0.6, BANK_RATE = 2.2, BANK_LEVEL_RATE = 1.6, TURN_SPEED = 8   // rad, rad/s, rad/s, units/s per rad
+// Visual roll only (steering itself always uses the untouched `bank` value below) - "bank into the turn"
+// means the side you're turning toward should dip down. Verified this sign with a headless three.js script
+// (not committed): rotation.z = +1*bank raises the turned-toward side, which is backward; -1 is correct.
+const BANK_ROLL_SIGN = -1
 const MAX_PITCH = 0.5, PITCH_RATE = 2.2, PITCH_LEVEL_RATE = 1.6, PITCH_CLIMB_RATE = 6
 const FLAP_LIFT = 14, GRAVITY = 9, FLAP_ACCEL = 4, DRAG = 2, MIN_SPEED = 3, MAX_SPEED = 12, MAX_VY = 8
 const CREATURE_RADIUS = 1.5, Y_MIN = CORRIDOR_BOTTOM + 2, Y_MAX = CORRIDOR_TOP - 4
@@ -254,7 +258,7 @@ function stepPhysics(dt) {
   const bankTarget = pose ? poseBank * MAX_BANK : held('ArrowLeft', 'a', 'A') ? -MAX_BANK : held('ArrowRight', 'd', 'D') ? MAX_BANK : 0
   const bankRate = bankTarget === 0 ? BANK_LEVEL_RATE : BANK_RATE
   bank += Math.sign(bankTarget - bank) * Math.min(Math.abs(bankTarget - bank), bankRate * dt)
-  creature.rotation.z = bank
+  creature.rotation.z = BANK_ROLL_SIGN * bank // "bank into the turn": the side you're turning toward dips down
   creature.position.x += Math.sin(bank) * TURN_SPEED * dt
 
   // Pitch: nose attitude only (visual + arrow-key climb when there's no phone) - in pose mode, altitude comes
