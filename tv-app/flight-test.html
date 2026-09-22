@@ -200,12 +200,12 @@ new GLTFLoader().load(CREATURE_URL, (gltf) => {
 })
 
 // ---- Flight physics state ----
-let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED
+let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED, wingRate = 0 // wingRate also drives the wing-flap animation speed, see tick()
 let finished = false, finishAt = 0
 
 function resetFlight() {
   creature.position.set(0, CRUISE_Y, 0)
-  bank = pitch = vy = 0; speed = MIN_SPEED; finished = false
+  bank = pitch = vy = wingRate = 0; speed = MIN_SPEED; finished = false
   banner.style.display = 'none'
   for (const p of confetti.splice(0)) scene.remove(p.mesh)
 }
@@ -238,8 +238,8 @@ function stepPhysics(dt) {
   // Flap: lift scales with how fast the wrists are actually moving - no motion (even arms held high) gives no
   // lift and the creature sinks, same as not flapping; flapping harder (up to saturation) climbs faster.
   const flapRate = pose ? poseFlapRate : (held(' ') ? FLAP_RATE_SATURATION : 0)
-  const flapFrac = clamp1((flapRate - FLAP_RATE_DEADZONE) / (FLAP_RATE_SATURATION - FLAP_RATE_DEADZONE))
-  if (flapFrac > 0) { vy += FLAP_LIFT * flapFrac * dt; speed = Math.min(MAX_SPEED, speed + FLAP_ACCEL * flapFrac * dt) }
+  wingRate = clamp1((flapRate - FLAP_RATE_DEADZONE) / (FLAP_RATE_SATURATION - FLAP_RATE_DEADZONE))
+  if (wingRate > 0) { vy += FLAP_LIFT * wingRate * dt; speed = Math.min(MAX_SPEED, speed + FLAP_ACCEL * wingRate * dt) }
   else { vy -= GRAVITY * dt; speed = Math.max(MIN_SPEED, speed - DRAG * dt) }
   vy = Math.max(-MAX_VY, Math.min(MAX_VY, vy))
   creature.position.y += vy * dt
@@ -330,10 +330,10 @@ window.DEBUG = {
 let last = performance.now()
 function tick(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now
-  mixer?.update(dt)
   if (creature) {
     if (finished) { if (now - finishAt > CELEBRATE_MS) resetFlight() }
     else stepPhysics(dt)
+    if (mixer) { mixer.timeScale = wingRate; mixer.update(dt) } // wings only animate while actually flapping
     updateConfetti(dt)
     updateDebugOverlay()
     camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
