@@ -93,13 +93,16 @@ const POSE_TIMEOUT_MS = 500
 // is from the player, so these starting values are a best guess, not measured.
 const BANK_SIGN = 1        // flip to -1 if banking feels backward once tested for real
 const BANK_GAIN = 1.0      // how much wrist tilt (in shoulder-widths) maps to full bank
-const PITCH_GAIN = 1.0     // how much arm-height tilt (in shoulder-widths) maps to full pitch
-const FLAP_VELOCITY_THRESHOLD = 1.2 // normalized-y-units/sec of upward wrist motion that counts as a flap
-const FLAP_HOLD_MS = 400   // how long one detected flap gesture keeps thrust engaged
+const PITCH_GAIN = 1.0     // how much arm-height tilt (in shoulder-widths) maps to full pitch (nose attitude only - see stepPhysics)
+// Flapping is a continuous rate, not an on/off gesture: altitude comes from how fast the player is actually
+// moving their arms (in either direction - a real flap has an up stroke and a down stroke), so holding arms
+// still - even held high - gives no lift and the creature sinks, same as not flapping at all.
+const FLAP_RATE_DEADZONE = 0.4    // normalized-y-units/sec of wrist motion below this doesn't count as flapping (filters hold-still jitter)
+const FLAP_RATE_SATURATION = 3.0  // wrist motion at/above this rate gives full lift; flapping harder doesn't add more
 
-let lastPoseAt = -1e9, poseBank = 0, posePitch = 0, flapHoldUntil = 0
+let lastPoseAt = -1e9, poseBank = 0, posePitch = 0, poseFlapRate = 0
 let lastBody = null // raw keypoints from the most recent pose, kept only for the debug overlay
-const wristYHistory = [] // rolling {t, y} window used to detect a rapid upward flap motion
+const wristYHistory = [] // rolling {t, y} window used to measure how fast the wrists are currently moving
 const clamp1 = (v) => Math.max(-1, Math.min(1, v))
 
 // b = the phone's full body keypoint array, in phone-app's BODY order: [nose, Lsh, Rsh, Lel, Rel, Lwr, Rwr, Lhip, Rhip, ...]
@@ -111,17 +114,14 @@ function onPose(b) {
 
   // Bank: wrists tilted like airplane wings - left wrist higher (smaller y) than right = bank right.
   poseBank = BANK_SIGN * clamp1(((rwr[1] - lwr[1]) / shoulderW) * BANK_GAIN)
-  // Pitch: average wrist height relative to shoulders - arms raised (smaller y) = climb.
+  // Pitch: average wrist height relative to shoulders - arms raised (smaller y) = nose up.
   posePitch = clamp1(((shoulderY - avgWristY) / shoulderW) * PITCH_GAIN)
 
   const now = performance.now()
   wristYHistory.push({ t: now, y: avgWristY })
   while (wristYHistory.length && now - wristYHistory[0].t > 300) wristYHistory.shift()
   const oldest = wristYHistory[0]
-  if (oldest && now - oldest.t > 80) { // need a little time spread for a meaningful velocity estimate
-    const velocity = (oldest.y - avgWristY) / ((now - oldest.t) / 1000) // positive = moving up
-    if (velocity > FLAP_VELOCITY_THRESHOLD) flapHoldUntil = now + FLAP_HOLD_MS
-  }
+  if (oldest && now - oldest.t > 80) poseFlapRate = Math.abs(oldest.y - avgWristY) / ((now - oldest.t) / 1000) // abs: both strokes of a flap count
   lastPoseAt = now
 }
 const poseLive = () => performance.now() - lastPoseAt < POSE_TIMEOUT_MS
@@ -224,20 +224,22 @@ function stepPhysics(dt) {
   const bankTarget = pose ? poseBank * MAX_BANK : held('ArrowLeft', 'a', 'A') ? -MAX_BANK : held('ArrowRight', 'd', 'D') ? MAX_BANK : 0
   const bankRate = bankTarget === 0 ? BANK_LEVEL_RATE : BANK_RATE
   bank += Math.sign(bankTarget - bank) * Math.min(Math.abs(bankTarget - bank), bankRate * dt)
-  creature.rotation.z = -bank
+  creature.rotation.z = bank
   creature.position.x += Math.sin(bank) * TURN_SPEED * dt
 
-  // Pitch: same shape, feeding a direct climb/dive rate.
+  // Pitch: nose attitude only (visual + arrow-key climb when there's no phone) - in pose mode, altitude comes
+  // solely from flapping below, so just holding your arms up doesn't climb.
   const pitchTarget = pose ? posePitch * MAX_PITCH : held('ArrowUp', 'w', 'W') ? MAX_PITCH : held('ArrowDown', 's', 'S') ? -MAX_PITCH : 0
   const pitchRate = pitchTarget === 0 ? PITCH_LEVEL_RATE : PITCH_RATE
   pitch += Math.sign(pitchTarget - pitch) * Math.min(Math.abs(pitchTarget - pitch), pitchRate * dt)
   creature.rotation.x = pitch
-  creature.position.y += Math.sin(pitch) * PITCH_CLIMB_RATE * dt
+  if (!pose) creature.position.y += Math.sin(pitch) * PITCH_CLIMB_RATE * dt
 
-  // Flap: holding (or a detected flap gesture) gains altitude + forward speed; releasing lets both bleed off
-  // gradually (glide-then-sink).
-  const flapping = pose ? performance.now() < flapHoldUntil : held(' ')
-  if (flapping) { vy += FLAP_LIFT * dt; speed = Math.min(MAX_SPEED, speed + FLAP_ACCEL * dt) }
+  // Flap: lift scales with how fast the wrists are actually moving - no motion (even arms held high) gives no
+  // lift and the creature sinks, same as not flapping; flapping harder (up to saturation) climbs faster.
+  const flapRate = pose ? poseFlapRate : (held(' ') ? FLAP_RATE_SATURATION : 0)
+  const flapFrac = clamp1((flapRate - FLAP_RATE_DEADZONE) / (FLAP_RATE_SATURATION - FLAP_RATE_DEADZONE))
+  if (flapFrac > 0) { vy += FLAP_LIFT * flapFrac * dt; speed = Math.min(MAX_SPEED, speed + FLAP_ACCEL * flapFrac * dt) }
   else { vy -= GRAVITY * dt; speed = Math.max(MIN_SPEED, speed - DRAG * dt) }
   vy = Math.max(-MAX_VY, Math.min(MAX_VY, vy))
   creature.position.y += vy * dt
@@ -306,11 +308,11 @@ function updateDebugOverlay() {
     `pose: ${pose ? 'LIVE' : 'no signal (keyboard)'}\n` +
     `bank  ${bank.toFixed(2)} / ${MAX_BANK.toFixed(2)}  (raw ${poseBank.toFixed(2)})\n` +
     `pitch ${pitch.toFixed(2)} / ${MAX_PITCH.toFixed(2)}  (raw ${posePitch.toFixed(2)})\n` +
-    `flap  ${performance.now() < flapHoldUntil ? 'ON' : 'off'}\n` +
+    `flap  rate ${poseFlapRate.toFixed(2)}  (deadzone ${FLAP_RATE_DEADZONE} / saturation ${FLAP_RATE_SATURATION})\n` +
     `speed ${speed.toFixed(1)}  vy ${vy.toFixed(1)}\n` +
     `Lwr ${fmt(lwr)}  Rwr ${fmt(rwr)}\n` +
     `Lsh ${fmt(lsh)}  Rsh ${fmt(rsh)}\n` +
-    `BANK_GAIN ${BANK_GAIN}  PITCH_GAIN ${PITCH_GAIN}  FLAP_THR ${FLAP_VELOCITY_THRESHOLD}`
+    `BANK_GAIN ${BANK_GAIN}  PITCH_GAIN ${PITCH_GAIN}`
 }
 
 const banner = document.getElementById('banner')
@@ -319,7 +321,7 @@ window.DEBUG = {
   get creature() { return creature },
   get physics() { return { bank, pitch, speed, vy } },
   get finished() { return finished },
-  get pose() { return { live: poseLive(), poseBank, posePitch, flapping: performance.now() < flapHoldUntil } },
+  get pose() { return { live: poseLive(), poseBank, posePitch, poseFlapRate } },
   get debugVisible() { return debugVisible },
   set debugVisible(v) { debugVisible = !!v; debugEl.style.display = debugVisible ? 'block' : 'none' },
   get debugText() { return debugEl.textContent },
