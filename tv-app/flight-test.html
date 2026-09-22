@@ -7,9 +7,11 @@
   canvas{display:block}
   #hint{position:fixed;top:8px;left:12px;margin:0;color:#9ad;font:14px system-ui;opacity:.85}
 </style>
-<pre id="hint">Stage D: tilt your arms to bank &amp; pitch, flap to gain height (phone required - arrows/WASD/Space still work with no phone connected)</pre>
+<pre id="hint">Stage E: tilt your arms to bank &amp; pitch, flap to gain height (phone required - arrows/WASD/Space still work with no phone connected) - ` toggles the debug overlay</pre>
 <div id="banner" style="display:none;position:fixed;inset:0;align-items:center;justify-content:center;
   flex-direction:column;color:#fff;font:800 56px system-ui;text-shadow:0 2px 12px #000;pointer-events:none"></div>
+<pre id="debug" style="display:none;position:fixed;top:8px;right:12px;margin:0;color:#9f9;font:13px monospace;
+  background:#000a;padding:10px 14px;border-radius:8px;text-align:right;line-height:1.5"></pre>
 
 <!-- No bundler in this repo (see tv-app/index.html) - Three.js is loaded straight from a CDN via a native
      browser import map, same "no build step" philosophy as the rest of tv-app. -->
@@ -72,33 +74,44 @@ addEventListener('keydown', (e) => { if (KEY_KEYS.includes(e.key)) { keys[e.key]
 addEventListener('keyup', (e) => { keys[e.key] = false })
 const held = (...ks) => ks.some((k) => keys[k])
 
+// Stage E: a toggleable debug overlay (hidden by default - only shown while actively tuning) so sensitivity
+// constants below can be adjusted by watching real numbers instead of guessing. ` matches the common
+// game-debug-console convention and isn't used by any other control here.
+const debugEl = document.getElementById('debug')
+let debugVisible = false
+addEventListener('keydown', (e) => { if (e.key === '`') { debugVisible = !debugVisible; debugEl.style.display = debugVisible ? 'block' : 'none' } })
+
 // ---- Stage D: pose-driven flight controls. When a phone is streaming live pose data (fresher than
 // POSE_TIMEOUT_MS), it overrides the keyboard entirely for bank/pitch/flap; with no phone connected, the
 // Stage B keyboard controls keep working - handy for testing without a phone, and for A/B comparing feel.
 // Reuses the pose stream already flowing phone -> server -> TV for the main app's avatar (phone-app's `b`
 // body-keypoint array already includes shoulders + wrists), so no phone-app or server changes are needed. ----
 const POSE_TIMEOUT_MS = 500
-// Tune these against REAL pose data once you can playtest with a phone (Stage E's job) - normalized-coordinate
-// ranges vary with how far the phone is from the player, so these starting values are a best guess, not measured.
-const BANK_SIGN = 1            // flip to -1 if banking feels backward once tested for real
-const POSE_TILT_GAIN = 1.0     // how much wrist/shoulder tilt (in shoulder-widths) maps to full bank/pitch
+// Tune these against REAL pose data once you can playtest with a phone - turn on the debug overlay (` key)
+// to watch the live numbers below while you adjust. Normalized-coordinate ranges vary with how far the phone
+// is from the player, so these starting values are a best guess, not measured.
+const BANK_SIGN = 1        // flip to -1 if banking feels backward once tested for real
+const BANK_GAIN = 1.0      // how much wrist tilt (in shoulder-widths) maps to full bank
+const PITCH_GAIN = 1.0     // how much arm-height tilt (in shoulder-widths) maps to full pitch
 const FLAP_VELOCITY_THRESHOLD = 1.2 // normalized-y-units/sec of upward wrist motion that counts as a flap
-const FLAP_HOLD_MS = 400       // how long one detected flap gesture keeps thrust engaged
+const FLAP_HOLD_MS = 400   // how long one detected flap gesture keeps thrust engaged
 
 let lastPoseAt = -1e9, poseBank = 0, posePitch = 0, flapHoldUntil = 0
+let lastBody = null // raw keypoints from the most recent pose, kept only for the debug overlay
 const wristYHistory = [] // rolling {t, y} window used to detect a rapid upward flap motion
 const clamp1 = (v) => Math.max(-1, Math.min(1, v))
 
 // b = the phone's full body keypoint array, in phone-app's BODY order: [nose, Lsh, Rsh, Lel, Rel, Lwr, Rwr, Lhip, Rhip, ...]
 function onPose(b) {
   const [, lsh, rsh, , , lwr, rwr] = b
+  lastBody = b
   const shoulderW = Math.abs(rsh[0] - lsh[0]) || 0.001 // normalizes tilt by how big the person appears - distance-invariant
   const shoulderY = (lsh[1] + rsh[1]) / 2, avgWristY = (lwr[1] + rwr[1]) / 2
 
   // Bank: wrists tilted like airplane wings - left wrist higher (smaller y) than right = bank right.
-  poseBank = BANK_SIGN * clamp1(((rwr[1] - lwr[1]) / shoulderW) * POSE_TILT_GAIN)
+  poseBank = BANK_SIGN * clamp1(((rwr[1] - lwr[1]) / shoulderW) * BANK_GAIN)
   // Pitch: average wrist height relative to shoulders - arms raised (smaller y) = climb.
-  posePitch = clamp1(((shoulderY - avgWristY) / shoulderW) * POSE_TILT_GAIN)
+  posePitch = clamp1(((shoulderY - avgWristY) / shoulderW) * PITCH_GAIN)
 
   const now = performance.now()
   wristYHistory.push({ t: now, y: avgWristY })
@@ -282,6 +295,23 @@ function updateConfetti(dt) {
   }
 }
 
+// Stage E debug overlay content - only formatted while visible (cheap to skip otherwise).
+function updateDebugOverlay() {
+  if (!debugVisible) return
+  const pose = poseLive()
+  const fmt = (p) => p ? `[${p[0].toFixed(2)}, ${p[1].toFixed(2)}]` : '-'
+  const [, lsh, rsh, , , lwr, rwr] = lastBody || []
+  debugEl.textContent =
+    `pose: ${pose ? 'LIVE' : 'no signal (keyboard)'}\n` +
+    `bank  ${bank.toFixed(2)} / ${MAX_BANK.toFixed(2)}  (raw ${poseBank.toFixed(2)})\n` +
+    `pitch ${pitch.toFixed(2)} / ${MAX_PITCH.toFixed(2)}  (raw ${posePitch.toFixed(2)})\n` +
+    `flap  ${performance.now() < flapHoldUntil ? 'ON' : 'off'}\n` +
+    `speed ${speed.toFixed(1)}  vy ${vy.toFixed(1)}\n` +
+    `Lwr ${fmt(lwr)}  Rwr ${fmt(rwr)}\n` +
+    `Lsh ${fmt(lsh)}  Rsh ${fmt(rsh)}\n` +
+    `BANK_GAIN ${BANK_GAIN}  PITCH_GAIN ${PITCH_GAIN}  FLAP_THR ${FLAP_VELOCITY_THRESHOLD}`
+}
+
 const banner = document.getElementById('banner')
 window.DEBUG = {
   scene, camera, onPose, // onPose exposed so a phone-less test can feed a synthetic body-keypoint array directly
@@ -289,6 +319,9 @@ window.DEBUG = {
   get physics() { return { bank, pitch, speed, vy } },
   get finished() { return finished },
   get pose() { return { live: poseLive(), poseBank, posePitch, flapping: performance.now() < flapHoldUntil } },
+  get debugVisible() { return debugVisible },
+  set debugVisible(v) { debugVisible = !!v; debugEl.style.display = debugVisible ? 'block' : 'none' },
+  get debugText() { return debugEl.textContent },
 }
 
 let last = performance.now()
@@ -299,6 +332,7 @@ function tick(now) {
     if (finished) { if (now - finishAt > CELEBRATE_MS) resetFlight() }
     else stepPhysics(dt)
     updateConfetti(dt)
+    updateDebugOverlay()
     camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
     camera.lookAt(creature.position.x, creature.position.y + 0.5, creature.position.z)
   }
