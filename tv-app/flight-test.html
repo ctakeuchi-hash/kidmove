@@ -154,17 +154,63 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.1)
 sun.position.set(15, 25, 10)
 scene.add(sun)
 
-// ---- Canyon: a continuous floor the length of the maze, plus one "gate" per MAZE entry - a picture-frame
-// of up to 4 simple boxes (left/right sides always, floor/ceiling risers only when a gate is vertically
-// constrained) built purely from each entry's data. Simple flat colors ("textured simply" per the brief). ----
+// ---- Landscape: a grass floor with a winding river, mountain ranges along both sides, and scattered trees,
+// plus one "gate" per MAZE entry - the same collidable risers as before (left/right walls become mountain
+// slopes, floor risers become rocky hills, ceiling risers become stone overpasses/bridges you duck under).
+// All still simple flat-color primitive geometry, just dressed up - the collision math is untouched. ----
 const floorLen = -FINISH_Z + 40
 const floor = new THREE.Mesh(
   new THREE.PlaneGeometry(CORRIDOR_HALF_WIDTH * 2, floorLen),
-  new THREE.MeshStandardMaterial({ color: 0x2c2f22 }),
+  new THREE.MeshStandardMaterial({ color: 0x3a4a26 }), // grass
 )
 floor.rotation.x = -Math.PI / 2
 floor.position.set(0, CORRIDOR_BOTTOM, FINISH_Z / 2)
 scene.add(floor)
+
+// River: a gentle, decorative sine-wave ribbon down the middle - not tied to the gates or collision.
+const riverX = (z) => 4 * Math.sin(z * 0.02)
+const riverMat = new THREE.MeshStandardMaterial({ color: 0x2f7fb8, roughness: 0.3 })
+for (let z = 15; z > FINISH_Z - 15; z -= 13) {
+  const seg = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.1, 14), riverMat)
+  seg.position.set(riverX(z), CORRIDOR_BOTTOM + 0.06, z)
+  scene.add(seg)
+}
+
+// Trees: simple cone+cylinder, scattered just outside the flyable corridor on both sides.
+const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5b3a22, roughness: 0.9 })
+const leafMat = new THREE.MeshStandardMaterial({ color: 0x2f6b34, roughness: 0.8 })
+function addTree(x, z, scale) {
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25 * scale, 0.3 * scale, 1.6 * scale, 6), trunkMat)
+  trunk.position.set(x, CORRIDOR_BOTTOM + 0.8 * scale, z)
+  scene.add(trunk)
+  const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.1 * scale, 2.4 * scale, 7), leafMat)
+  leaves.position.set(x, CORRIDOR_BOTTOM + 2.2 * scale, z)
+  scene.add(leaves)
+}
+for (let z = 10; z > FINISH_Z - 10; z -= 16) { // ponytail: sparse on purpose - each tree is 2 draw calls and this is a lot of trees; densify only after confirming frame rate on the real (old, weak) TV box
+  addTree(CORRIDOR_HALF_WIDTH + 1.5 + Math.random() * 3, z + Math.random() * 4, 0.7 + Math.random() * 0.6)
+  addTree(-CORRIDOR_HALF_WIDTH - 1.5 - Math.random() * 3, z + Math.random() * 4, 0.7 + Math.random() * 0.6)
+}
+
+// Mountains: a continuous jagged skyline of cone peaks along both sides, well above the flyable corridor
+// (CORRIDOR_TOP) so they're pure backdrop, never collidable. Taller peaks get a small white snow cap.
+const rockMat = new THREE.MeshStandardMaterial({ color: 0x6e6459, roughness: 0.95 })
+const snowMat = new THREE.MeshStandardMaterial({ color: 0xf0f2f5, roughness: 0.8 })
+function addPeak(x, z, h) {
+  const peak = new THREE.Mesh(new THREE.ConeGeometry(h * 0.55, h, 6), rockMat)
+  peak.position.set(x, CORRIDOR_BOTTOM + h / 2, z)
+  scene.add(peak)
+  if (h > 26) { // snow cap: a smaller cone centered near the peak's apex, mostly embedded so it reads as a cap
+    const capH = h * 0.3
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(h * 0.55 * 0.3, capH, 6), snowMat)
+    cap.position.set(x, CORRIDOR_BOTTOM + h - capH * 0.3, z)
+    scene.add(cap)
+  }
+}
+for (let z = 25; z > FINISH_Z - 25; z -= 26) {
+  addPeak(CORRIDOR_HALF_WIDTH + 6 + Math.random() * 10, z + Math.random() * 8, 24 + Math.random() * 20)
+  addPeak(-CORRIDOR_HALF_WIDTH - 6 - Math.random() * 10, z + Math.random() * 8, 24 + Math.random() * 20)
+}
 
 const gateMat = new THREE.MeshStandardMaterial({ color: 0x8a6a4f, roughness: 0.95 })
 function addBox(w, h, x, y, z) {
@@ -176,10 +222,19 @@ function addBox(w, h, x, y, z) {
 for (const g of MAZE) {
   const gapY = g.gapY ?? CRUISE_Y, gapHeight = g.gapHeight ?? CORRIDOR_HEIGHT
   const leftEdge = g.gapX - g.gapWidth / 2, rightEdge = g.gapX + g.gapWidth / 2
-  addBox(leftEdge - (-CORRIDOR_HALF_WIDTH), CORRIDOR_HEIGHT, (-CORRIDOR_HALF_WIDTH + leftEdge) / 2, (CORRIDOR_BOTTOM + CORRIDOR_TOP) / 2, g.z) // left side
-  addBox(CORRIDOR_HALF_WIDTH - rightEdge, CORRIDOR_HEIGHT, (rightEdge + CORRIDOR_HALF_WIDTH) / 2, (CORRIDOR_BOTTOM + CORRIDOR_TOP) / 2, g.z) // right side
-  addBox(g.gapWidth, (gapY - gapHeight / 2) - CORRIDOR_BOTTOM, g.gapX, (CORRIDOR_BOTTOM + (gapY - gapHeight / 2)) / 2, g.z) // floor riser (climb gates)
-  addBox(g.gapWidth, CORRIDOR_TOP - (gapY + gapHeight / 2), g.gapX, (CORRIDOR_TOP + (gapY + gapHeight / 2)) / 2, g.z)     // ceiling riser (dive gates)
+  addBox(leftEdge - (-CORRIDOR_HALF_WIDTH), CORRIDOR_HEIGHT, (-CORRIDOR_HALF_WIDTH + leftEdge) / 2, (CORRIDOR_BOTTOM + CORRIDOR_TOP) / 2, g.z) // left mountain slope
+  addBox(CORRIDOR_HALF_WIDTH - rightEdge, CORRIDOR_HEIGHT, (rightEdge + CORRIDOR_HALF_WIDTH) / 2, (CORRIDOR_BOTTOM + CORRIDOR_TOP) / 2, g.z) // right mountain slope
+  addBox(g.gapWidth, (gapY - gapHeight / 2) - CORRIDOR_BOTTOM, g.gapX, (CORRIDOR_BOTTOM + (gapY - gapHeight / 2)) / 2, g.z) // rocky hill (climb gates)
+  const ceilingH = CORRIDOR_TOP - (gapY + gapHeight / 2)
+  addBox(g.gapWidth, ceilingH, g.gapX, (CORRIDOR_TOP + (gapY + gapHeight / 2)) / 2, g.z) // stone overpass span (dive gates)
+  // Overpass pillars: only a real "duck under this" ceiling riser (dive gates) gets visible stone supports
+  // down to the ground on both sides of the gap, so the span above reads as a bridge, not a slab floating in
+  // mid-air. Climb gates also get a thin ceiling cap above (harmless), but it's too small to need pillars.
+  if (ceilingH > 10) {
+    const pillar = (x) => { const m = new THREE.Mesh(new THREE.BoxGeometry(1.2, CORRIDOR_HEIGHT - ceilingH, GATE_THICKNESS * 0.7), gateMat); m.position.set(x, CORRIDOR_BOTTOM + (CORRIDOR_HEIGHT - ceilingH) / 2, g.z); scene.add(m) }
+    pillar(g.gapX - g.gapWidth / 2 + 0.6)
+    pillar(g.gapX + g.gapWidth / 2 - 0.6)
+  }
 }
 
 // ---- Creature: a horse body with bird wings, built from primitive geometry (boxes/cones/cylinders), same
