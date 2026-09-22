@@ -261,23 +261,22 @@ function addRockMass(xCenter, width, yBase, height, z) {
   const n = Math.max(2, Math.ceil(usable / (radius * 1.3)) + 1) // spacing < 2*radius guarantees overlap
   for (let i = 0; i < n; i++) addRockCone(xCenter - width / 2 + radius + usable * i / (n - 1), radius, yBase, height, z)
 }
-// Arch: a solid rounded tunnel (a big cylinder lying on its side, spanning the gap width) instead of jagged
-// rock cones for the ceiling obstacle - its rounded underside reads as "fly under this arch" from below, the
-// same visual cue an actual archway would give. It stays a solid mesh on purpose, not a hollow ring: the
-// entire band from yBase up to CORRIDOR_TOP is real collision volume with no flyable opening in it anywhere,
-// so a genuinely hollow arch shape would visually lie about where the invisible collision boundary is.
-// The cylinder's lowest point sits exactly at yBase (the actual collision boundary) - never below it, so it
-// can't intrude into the flyable space beneath, the same edge-touching-not-crossing rule addRockMass follows.
-function addArch(xCenter, width, yBase, height, z) {
+// Bridge: a flat stone deck on two piers, not a mountain shape - a real bridge, matching what the player is
+// meant to read as "fly under this". No cones anywhere in it. The deck's underside sits exactly at yBase (the
+// actual collision boundary), the same edge-touching-not-crossing rule addRockMass follows. It's deliberately
+// NOT sized to fill the whole band up to CORRIDOR_TOP - the per-gate collision clamp in stepPhysics already
+// stops the player right at the deck's underside, so nothing above a modest deck is ever visible or reachable;
+// making it that tall only produced an oversized shape looming in the sky for no visual benefit.
+function addBridge(xCenter, width, yBase, height, z) {
   if (width <= 0.05 || height <= 0.05) return
-  const radius = Math.max(height, width * 0.6) // generous: radius >= height guarantees the top clears CORRIDOR_TOP with no separate fill piece needed
-  const tunnel = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, width, 20), rockMat)
-  tunnel.rotation.z = Math.PI / 2 // axis along X, spanning exactly the gap width - same footprint the wall cones touch, not cross
-  tunnel.position.set(xCenter, yBase + radius, z)
-  scene.add(tunnel)
-  const legW = 2.6 // short rock legs so it doesn't look like it's floating - outside the gap, same inset rule as the wall cones
-  addRockMass(xCenter - width / 2 - legW / 2, legW, CORRIDOR_BOTTOM, yBase - CORRIDOR_BOTTOM, z)
-  addRockMass(xCenter + width / 2 + legW / 2, legW, CORRIDOR_BOTTOM, yBase - CORRIDOR_BOTTOM, z)
+  const deckH = Math.min(2.5, height * 0.4)
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(width, deckH, GATE_THICKNESS), rockMat)
+  deck.position.set(xCenter, yBase + deckH / 2, z)
+  scene.add(deck)
+  const pierW = 2.2 // piers sit entirely outside the gap (footprint ends exactly at the gap edge, not straddling it)
+  const pier = (x) => { const m = new THREE.Mesh(new THREE.BoxGeometry(pierW, yBase - CORRIDOR_BOTTOM, GATE_THICKNESS * 0.6), rockMat); m.position.set(x, (CORRIDOR_BOTTOM + yBase) / 2, z); scene.add(m) }
+  pier(xCenter - width / 2 - pierW / 2)
+  pier(xCenter + width / 2 + pierW / 2)
 }
 for (const g of MAZE) {
   const gapY = g.gapY ?? CRUISE_Y, gapHeight = g.gapHeight ?? CORRIDOR_HEIGHT
@@ -290,7 +289,7 @@ for (const g of MAZE) {
   // side, harmless as a thin flat sliver but very visible as chunky cones spanning the whole gap width. Only
   // climb/dive gates clear this threshold; straight gates correctly render nothing on the small side.
   if (floorH > 8) addRockMass(g.gapX, g.gapWidth, CORRIDOR_BOTTOM, floorH, g.z) // rocky hill you climb over (climb gates)
-  if (ceilingH > 8) addArch(g.gapX, g.gapWidth, gapY + gapHeight / 2, ceilingH, g.z) // rock arch you duck under (dive gates)
+  if (ceilingH > 8) addBridge(g.gapX, g.gapWidth, gapY + gapHeight / 2, ceilingH, g.z) // stone bridge you duck under (dive gates)
 }
 
 // ---- Creature: a horse body with bird wings, built from primitive geometry (boxes/cones/cylinders), same
