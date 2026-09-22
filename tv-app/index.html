@@ -20,7 +20,7 @@
 <script>
 // ---- Config: override any of these via URL, e.g. /tv/?set=hiragana&players=2&threshold=0.7&mouse=1 ----
 // Start straight into a game with ?game=jump or ?set=upper|lower|digits|hiragana|katakana (no param = menu).
-// Keys: 1-5 pick a character set, 6 Jump Dodge, P = 1/2 players, Esc = menu, ←/→ = prev/next character, ↑/↓ = how much of a stroke is needed
+// Keys: 1-5 pick a character set, 6 Jump Dodge, 7 Alicorn Flight, P = 1/2 players, Esc = menu, ←/→ = prev/next character, ↑/↓ = how much of a stroke is needed
 // (Jump: jump size), [ ] = arm reach, M = mute, Space = fake jump (testing), Enter = new session after the break scene.
 const CONFIG = {
   threshold: 0.85,  // fraction of each stroke you must trace to complete it
@@ -49,7 +49,7 @@ let W, H
 const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; if (scene === 'play' && mode === 'trace') loadChar(idx) }
 
 // ---- App state ----
-let scene = 'menu'                 // 'menu' | 'groups' | 'play'
+let scene = 'menu'                 // 'menu' | 'sets' | 'groups' | 'play'
 let mode = 'trace', set = 'upper'   // what is being played: 'trace' (character set = set) or 'jump'
 let nPlayers = CONFIG.players === 2 ? 2 : 1
 let winTimer, idx = 0, won = false, hue = 0
@@ -82,7 +82,7 @@ function layout(i) {
   if (nPlayers === 1) return { cx: W / 2, size: Math.min(H * 0.8, W * 0.6 / bw) }
   return { cx: W * (i ? 0.75 : 0.25), size: Math.min(H * 0.7, W * 0.4 / bw) }
 }
-const anchorX = (i) => scene === 'menu' || scene === 'groups' ? (nPlayers === 1 ? W / 2 : W * (i ? 0.58 : 0.42)) : layout(i).cx
+const anchorX = (i) => scene === 'menu' || scene === 'sets' || scene === 'groups' ? (nPlayers === 1 ? W / 2 : W * (i ? 0.58 : 0.42)) : layout(i).cx
 
 // ---- Trace game: each character is a list of strokes (strokes.js / kana.js). Trace them IN ORDER, each in its own direction:
 // start near the numbered dot, follow the arrows. Paint only appears along the line you have actually traced.
@@ -365,7 +365,8 @@ function setPlayers(n) {
   else if (scene === 'play') loadChar(idx)
   sendConfig()
 }
-function pickGroup(setId) { // called from the groups screen, and directly (voice/keyboard) to bypass it
+function pickSet() { clearTimeout(winTimer); confetti.length = 0; scene = 'sets'; dwell = null; syncBar() }
+function pickGroup(setId) { // called from the sets screen, and directly (voice/keyboard) to bypass menu navigation
   clearTimeout(winTimer); confetti.length = 0; scene = 'groups'; pendingSet = setId; dwell = null; syncBar()
 }
 function chooseGroup(groupId) { CONFIG.group = groupId; order = null; startGame('trace', pendingSet); pendingSet = null }
@@ -401,13 +402,13 @@ document.getElementById('btnSkip').onclick = () => loadChar(idx + 1)
 document.getElementById('snd').onclick = () => { if (actx && actx.state === 'running') { muted = !muted; syncBar() } }
 
 // ---- Menu scene: big buttons, pressed by clicking, by holding your hand on one, or from the phone ----
-const MENU_SETS = ['upper', 'lower', 'digits', 'hiragana', 'katakana', 'jump']
+const MENU_SETS = ['trace', 'jump', 'flight'] // the 3 games; picking 'trace' leads to the sets screen to choose a character set
 let dwell = null, mouseXY = null
 function menuRects() {
-  const cw = W * 0.24, chh = H * 0.2, gx = W * 0.03, gy = H * 0.04, x0 = (W - (3 * cw + 2 * gx)) / 2, y0 = H * 0.34
+  const cw = W * 0.24, chh = H * 0.3, gx = W * 0.03, x0 = (W - (3 * cw + 2 * gx)) / 2, y0 = H * 0.34
   return [
-    ...[1, 2].map((n, i) => ({ id: 'p' + n, n, x: W / 2 - W * 0.17 + i * W * 0.18, y: H * 0.2, w: W * 0.16, h: H * 0.09 })),
-    ...MENU_SETS.map((id, i) => ({ id, x: x0 + (i % 3) * (cw + gx), y: y0 + Math.floor(i / 3) * (chh + gy), w: cw, h: chh })),
+    ...[1, 2].map((n, i) => ({ id: 'p' + n, n, x: W / 2 - W * 0.17 + i * W * 0.18, y: H * 0.17, w: W * 0.16, h: H * 0.08 })),
+    ...MENU_SETS.map((id, i) => ({ id, x: x0 + i * (cw + gx), y: y0, w: cw, h: chh })),
   ]
 }
 const inRect = (r, x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
@@ -415,11 +416,55 @@ function pressMenu(r) {
   sfx.ping(2); cheer(700)
   if (r.n) { setPlayers(r.n); return }
   if (r.id === 'jump') { startGame('jump'); return }
-  pickGroup(r.id) // trace sets go through the groups screen first (its 'All' tile plays everything, same as before)
+  if (r.id === 'flight') { location.href = 'flight-test.html'; return }
+  pickSet() // 'trace' leads to the sets screen to choose upper/lower/digits/hiragana/katakana
 }
 function menuPointers(now) { // hands (fresh poses) and the mouse
   const p = active().filter((pl) => pl.ptr && now - pl.ptr.t < 500).map((pl) => pl.ptr)
   return mouseXY ? [...p, mouseXY] : p
+}
+
+// ---- Sets screen: pick which character set to trace (upper/lower/digits/hiragana/katakana). Same
+// dwell/click mechanics as the main menu, reached from the menu's 'trace' tile. ----
+const CHAR_SETS = ['upper', 'lower', 'digits', 'hiragana', 'katakana']
+function setsRects() {
+  const cols = CHAR_SETS.length, gx = W * 0.02, chh = H * 0.3
+  const cw = (W * 0.92 - (cols - 1) * gx) / cols
+  const x0 = (W - (cols * cw + (cols - 1) * gx)) / 2, y0 = H * 0.34
+  return [
+    { id: 'back', back: true, x: W * 0.03, y: H * 0.03, w: W * 0.14, h: H * 0.07 },
+    ...CHAR_SETS.map((id, i) => ({ id, x: x0 + i * (cw + gx), y: y0, w: cw, h: chh })),
+  ]
+}
+function pressSets(r) {
+  sfx.ping(2); cheer(700)
+  if (r.back) { showMenu(); return }
+  pickGroup(r.id)
+}
+function drawSets(now, dt) {
+  const rects = setsRects(), ptrs = menuPointers(now)
+  ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = '800 48px system-ui'; ctx.fillText('Pick a character set', W / 2, H * 0.2)
+  let hover = null
+  for (const r of rects) if (ptrs.some((q) => inRect(r, q.x, q.y))) hover = r
+  if (hover && dwell && dwell.id === hover.id) { dwell.ms += dt * 1000; if (dwell.ms >= CONFIG.dwellMs) { const r = hover; dwell = null; pressSets(r); return } }
+  else dwell = hover ? { id: hover.id, ms: 0 } : null
+  for (const r of rects) {
+    const on = hover === r
+    ctx.save(); if (on) { ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(1.05, 1.05); ctx.translate(-r.x - r.w / 2, -r.y - r.h / 2) }
+    ctx.fillStyle = on ? 'hsl(210 70% 42%)' : 'hsl(210 45% 26%)'; ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 22); ctx.fill()
+    ctx.lineWidth = !r.back && r.id === set ? 6 : 3; ctx.strokeStyle = !r.back && r.id === set ? '#ffd23f' : 'rgba(255,255,255,.3)'; ctx.stroke()
+    ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'
+    if (r.back) { ctx.font = `700 ${r.h * 0.34}px system-ui`; ctx.fillText('⬅ Back', r.x + r.w / 2, r.y + r.h / 2 + 2) }
+    else {
+      ctx.font = `800 ${r.h * 0.42}px system-ui`; ctx.fillText(SETS[r.id].label, r.x + r.w / 2, r.y + r.h * 0.55)
+      ctx.font = '600 26px system-ui'; ctx.fillText(SETS[r.id].name, r.x + r.w / 2, r.y + r.h * 0.86)
+    }
+    if (on && dwell) { ctx.fillStyle = '#ffd23f'; ctx.fillRect(r.x + 16, r.y + r.h - 12, (r.w - 32) * Math.min(1, dwell.ms / CONFIG.dwellMs), 8) }
+    ctx.textBaseline = 'alphabetic'; ctx.restore()
+  }
+  ctx.font = '500 26px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.7)'
+  ctx.fillText('Hold your hand on a button to choose it', W / 2, H - 40)
+  for (const q of ptrs) { ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.shadowColor = '#fff'; ctx.shadowBlur = 20; ctx.beginPath(); ctx.arc(q.x, q.y, 16, 0, 7); ctx.fill(); ctx.shadowBlur = 0 }
 }
 
 // ---- Groups screen: pick a subset of the chosen set (or 'All'), plus a shuffle toggle. Same dwell/click
@@ -437,7 +482,7 @@ function groupRects() {
 }
 function pressGroup(r) {
   sfx.ping(2); cheer(700)
-  if (r.back) { showMenu(); return }
+  if (r.back) { pickSet(); return }
   if (r.shuf) { shuffle = !shuffle; return }
   chooseGroup(r.id)
 }
@@ -471,7 +516,7 @@ function drawMenu(now, dt) {
   if (hover && dwell && dwell.id === hover.id) { dwell.ms += dt * 1000; if (dwell.ms >= CONFIG.dwellMs) { const r = hover; dwell = null; pressMenu(r); return } }
   else dwell = hover ? { id: hover.id, ms: 0 } : null
   for (const r of rects) {
-    const on = hover === r, sel = r.n ? r.n === nPlayers : (r.id === set && mode === 'trace') || (r.id === 'jump' && mode === 'jump')
+    const on = hover === r, sel = r.n ? r.n === nPlayers : r.id === mode
     const k = MENU_SETS.indexOf(r.id), h = r.n ? 45 : (k * 55 + 200) % 360
     ctx.save(); if (on) { ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(1.05, 1.05); ctx.translate(-r.x - r.w / 2, -r.y - r.h / 2) }
     ctx.fillStyle = on ? `hsl(${h} 70% 42%)` : `hsl(${h} 45% 26%)`; ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 26); ctx.fill()
@@ -479,8 +524,9 @@ function drawMenu(now, dt) {
     ctx.fillStyle = '#fff'
     if (r.n) { ctx.font = '700 34px system-ui'; ctx.textBaseline = 'middle'; ctx.fillText(r.n === 1 ? '1 Player' : '2 Players', r.x + r.w / 2, r.y + r.h / 2 + 2) }
     else {
-      ctx.font = `800 ${r.h * 0.42}px system-ui`; ctx.fillText(r.id === 'jump' ? '🦘' : SETS[r.id].label, r.x + r.w / 2, r.y + r.h * 0.55)
-      ctx.font = '600 26px system-ui'; ctx.fillText(r.id === 'jump' ? 'Jump Dodge' : SETS[r.id].name, r.x + r.w / 2, r.y + r.h * 0.86)
+      const label = { trace: ['✏️', 'Letters & Numbers'], jump: ['🦘', 'Jump Dodge'], flight: ['🦄', 'Alicorn Flight'] }[r.id]
+      ctx.font = `800 ${r.h * 0.28}px system-ui`; ctx.fillText(label[0], r.x + r.w / 2, r.y + r.h * 0.4)
+      ctx.font = '600 30px system-ui'; ctx.fillText(label[1], r.x + r.w / 2, r.y + r.h * 0.58)
     }
     if (on && dwell) { ctx.fillStyle = '#ffd23f'; ctx.fillRect(r.x + 20, r.y + r.h - 14, (r.w - 40) * Math.min(1, dwell.ms / CONFIG.dwellMs), 8) } // hold-to-press bar
     ctx.textBaseline = 'alphabetic'; ctx.restore()
@@ -493,6 +539,7 @@ addEventListener('mousemove', (e) => { mouseXY = { x: e.clientX, y: e.clientY, t
 addEventListener('pointerdown', (e) => {
   if (sessionOver) return
   if (scene === 'menu') { const r = menuRects().find((q) => inRect(q, e.clientX, e.clientY)); if (r) pressMenu(r) }
+  else if (scene === 'sets') { const r = setsRects().find((q) => inRect(q, e.clientX, e.clientY)); if (r) pressSets(r) }
   else if (scene === 'groups') { const r = groupRects().find((q) => inRect(q, e.clientX, e.clientY)); if (r) pressGroup(r) }
 })
 
@@ -576,7 +623,7 @@ function onPose(m) {
       if (i === 0 && now > closeUntil + 1500) { sfx.boop(); pop('Whoa!', W - 150, H - 200) }
       closeUntil = now + 300
     }
-    if (scene === 'menu' || scene === 'groups') pl.ptr = { x: wristPx[hi][0], y: wristPx[hi][1], t: now }
+    if (scene === 'menu' || scene === 'sets' || scene === 'groups') pl.ptr = { x: wristPx[hi][0], y: wristPx[hi][1], t: now }
     else if (mode === 'trace') onWrists(pl, wristPx)
     else if (i === 0) onHips(p.k)
   }
@@ -642,13 +689,14 @@ function drawJump(now) {
 
 // ---- Keyboard ----
 addEventListener('keydown', (e) => {
-  const num = '123456'.indexOf(e.key)
+  const num = '1234567'.indexOf(e.key)
   if (e.key === 'Enter' && sessionOver) startSession()
   else if (e.key === 'Escape') showMenu()
   else if (e.key === 'm' || e.key === 'M') { muted = !muted; syncBar() }
   else if (e.key === 'p' || e.key === 'P') setPlayers(nPlayers === 1 ? 2 : 1)
   else if (e.key === '[' || e.key === ']') CONFIG.reach = Math.max(0.2, CONFIG.reach + (e.key === ']' ? 0.05 : -0.05))
-  else if (num >= 0) { if (num !== 5) CONFIG.group = 'all'; startGame(num === 5 ? 'jump' : 'trace', MENU_SETS[num]) }
+  else if (num === 6) location.href = 'flight-test.html'
+  else if (num >= 0) { if (num !== 5) CONFIG.group = 'all'; startGame(num === 5 ? 'jump' : 'trace', CHAR_SETS[num]) }
   else if (e.key === ' ') jump.fakeAt = performance.now()
   else if (scene === 'play' && mode === 'jump') {
     if (e.key === 'ArrowUp') CONFIG.jumpThreshold += 0.01
@@ -747,6 +795,7 @@ function draw() {
   else {
     for (const pl of active()) if (now - pl.lastPoseAt < 1500) drawAvatar(pl, now)
     if (scene === 'menu') drawMenu(now, dt)
+    else if (scene === 'sets') drawSets(now, dt)
     else if (scene === 'groups') drawGroups(now, dt)
     else if (mode === 'trace') drawTraceScreen(now)
     else drawJump(now)

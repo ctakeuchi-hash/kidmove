@@ -7,7 +7,7 @@
   canvas{display:block}
   #hint{position:fixed;top:8px;left:12px;margin:0;color:#9ad;font:14px system-ui;opacity:.85}
 </style>
-<pre id="hint">Stage E: tilt your arms to bank &amp; pitch, flap to gain height (phone required - arrows/WASD/Space still work with no phone connected) - ` toggles the debug overlay</pre>
+<pre id="hint">Stage E: tilt your arms to bank &amp; pitch, flap to gain height (phone required - arrows/WASD/Space still work with no phone connected) - ` toggles the debug overlay - Esc for menu</pre>
 <div id="banner" style="display:none;position:fixed;inset:0;align-items:center;justify-content:center;
   flex-direction:column;color:#fff;font:800 56px system-ui;text-shadow:0 2px 12px #000;pointer-events:none"></div>
 <pre id="debug" style="display:none;position:fixed;top:8px;right:12px;margin:0;color:#9f9;font:13px monospace;
@@ -80,6 +80,7 @@ const held = (...ks) => ks.some((k) => keys[k])
 const debugEl = document.getElementById('debug')
 let debugVisible = false
 addEventListener('keydown', (e) => { if (e.key === '`') { debugVisible = !debugVisible; debugEl.style.display = debugVisible ? 'block' : 'none' } })
+addEventListener('keydown', (e) => { if (e.key === 'Escape') location.href = 'index.html' })
 
 // ---- Stage D: pose-driven flight controls. When a phone is streaming live pose data (fresher than
 // POSE_TIMEOUT_MS), it overrides the keyboard entirely for bank/pitch/flap; with no phone connected, the
