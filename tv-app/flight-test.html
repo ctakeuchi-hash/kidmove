@@ -11,7 +11,7 @@
 <pre id="hint">Stage E: tilt your arms to bank &amp; pitch, flap to gain height (phone required - arrows/WASD/Space still work with no phone connected) - ` toggles the debug overlay - Esc for menu. Dodge boulders and clear bridges/hills clean for points!</pre>
 <pre id="score">Score: 0</pre>
 <div id="banner" style="display:none;position:fixed;inset:0;align-items:center;justify-content:center;
-  flex-direction:column;color:#fff;font:800 56px system-ui;text-shadow:0 2px 12px #000;pointer-events:none"></div>
+  flex-direction:column;color:#fff;font:800 56px system-ui;text-shadow:0 2px 12px #000;pointer-events:none;white-space:pre-line;text-align:center"></div>
 <pre id="debug" style="display:none;position:fixed;top:8px;right:12px;margin:0;color:#9f9;font:13px monospace;
   background:#000a;padding:10px 14px;border-radius:8px;text-align:right;line-height:1.5"></pre>
 
@@ -33,43 +33,94 @@ import * as THREE from 'three'
 // player's real arm angle (see updateWings()) instead of scrubbing a baked animation clip. See buildAlicorn().
 const CHASE_OFFSET = new THREE.Vector3(0, 3, 9) // camera position relative to the creature
 
-// ---- Stage C maze: a plain array of gate definitions, so new layouts are just data - no rendering/physics
-// code to touch. Each gate is {z, gapX, gapWidth, gapY, gapHeight}: gapX/gapY is the center of the opening,
-// gapWidth/gapHeight is how big it is. gapY/gapHeight default to CRUISE_Y/CORRIDOR_HEIGHT (dead center,
-// full height = no vertical constraint) when omitted, so most gates only need to specify a horizontal move.
-// Difficulty is kept easy per the brief (4-and-under): generous widths, gentle x offsets, gates spaced far
-// enough apart (at the game's slowest speed, MIN_SPEED) to give several seconds to react - no fast reflexes. ----
+// ---- Levels: 4 courses of increasing difficulty, each its own landscape theme, auto-advancing on finish (see
+// the finish handler in stepPhysics) so a young kid never has to navigate a menu mid-session. Each maze entry
+// is a gate {z, gapX, gapWidth, gapY, gapHeight}: gapX/gapY is the center of the opening, gapWidth/gapHeight is
+// how big it is; gapY/gapHeight default to CRUISE_Y/CORRIDOR_HEIGHT (dead center, full height = no vertical
+// constraint) when omitted. Progression: L1 no climb/dive, wide gaps, 2 obstacles (learn banking) -> L2 adds
+// one climb + one dive gate, narrower, 4 obstacles (learn pitch/flap for altitude) -> L3 tighter gaps,
+// alternating climb/dive, 5 obstacles -> L4 tightest, most gate variety, 6 obstacles. Still never a fail state
+// at any level - bounces are always gentle - so difficulty only affects how good a score you can get, not
+// whether a young kid can finish. ----
+const LEVELS = [
+  { name: 'Green Valley', finishZ: -260,
+    maze: [
+      { z: -45, gapX: 0, gapWidth: 14 }, { z: -90, gapX: 5, gapWidth: 13 }, { z: -135, gapX: -5, gapWidth: 13 },
+      { z: -180, gapX: 4, gapWidth: 13 }, { z: -225, gapX: 0, gapWidth: 14 },
+    ],
+    obstacles: [{ z: -25, x: 5, y: 9, radius: 1.5 }, { z: -110, x: -5, y: 9, radius: 1.5 }],
+    theme: {
+      sky: ['#3a7bd5', '#6fa8dc', '#bcd9ea', '#eaf6ff'], fog: 0xbcd9ea,
+      ambient: [0xcfe8ff, 0.75], sun: [0xfff3c4, 1.4], rim: [0xffffff, 0.12],
+      grass: ['#4a7a2a', '#3f6b22', '#5a8f38'], rock: ['#9c8468', 40, 30, 20], water: ['#2f9fd8', 0x0d5a8a],
+    } },
+  { name: 'Red Canyon', finishZ: -350,
+    maze: [
+      { z: -45, gapX: 0, gapWidth: 12 }, { z: -90, gapX: 6, gapWidth: 11 }, { z: -135, gapX: -6, gapWidth: 11 },
+      { z: -180, gapX: 0, gapWidth: 10, gapY: 18, gapHeight: 15 }, { z: -225, gapX: 0, gapWidth: 10, gapY: 0, gapHeight: 15 },
+      { z: -270, gapX: 6, gapWidth: 11 }, { z: -315, gapX: 0, gapWidth: 12 },
+    ],
+    obstacles: [
+      { z: -22, x: 5, y: 9, radius: 1.6 }, { z: -67, x: -5, y: 10, radius: 1.6 },
+      { z: -292, x: -4, y: 11, radius: 1.6 }, { z: -335, x: 4, y: 7, radius: 1.5 },
+    ],
+    theme: {
+      sky: ['#3a1f3a', '#6b2f3a', '#c8543a', '#ffb04a'], fog: 0xc8543a,
+      ambient: [0xcc8866, 0.5], sun: [0xffaa55, 1.4], rim: [0x552244, 0.3],
+      grass: ['#8a6a3a', '#7a5a2e', '#9c7a48'], rock: ['#8a4a3a', 50, 25, 10], water: ['#2a8fa8', 0x0a4a5a],
+    } },
+  { name: 'Snowy Peaks', finishZ: -400,
+    maze: [
+      { z: -45, gapX: 0, gapWidth: 11 }, { z: -90, gapX: -6, gapWidth: 10 },
+      { z: -135, gapX: 0, gapWidth: 9, gapY: 18, gapHeight: 14 }, { z: -180, gapX: 6, gapWidth: 10 },
+      { z: -225, gapX: 0, gapWidth: 9, gapY: 0, gapHeight: 14 }, { z: -270, gapX: -6, gapWidth: 10 },
+      { z: -315, gapX: 0, gapWidth: 9, gapY: 18, gapHeight: 14 }, { z: -360, gapX: 0, gapWidth: 11 },
+    ],
+    obstacles: [
+      { z: -22, x: 5, y: 9, radius: 1.5 }, { z: -67, x: -5, y: 11, radius: 1.5 }, { z: -112, x: 4, y: 6, radius: 1.5 },
+      { z: -292, x: -4, y: 12, radius: 1.5 }, { z: -337, x: 5, y: 7, radius: 1.5 },
+    ],
+    theme: {
+      sky: ['#0a1a3a', '#1a3a5a', '#4a6a8a', '#cfe8ff'], fog: 0x4a6a8a,
+      ambient: [0x9fc4e8, 0.6], sun: [0xdfefff, 1.2], rim: [0x6688aa, 0.3],
+      grass: ['#dbe8f2', '#c8d8e6', '#eef6fc'], rock: ['#7a8590', 30, 30, 35], water: ['#1f6fa0', 0x0a3a5a],
+    } },
+  { name: 'Dusk Peaks', finishZ: -400,
+    maze: [
+      { z: -45, gapX: 0, gapWidth: 12 }, { z: -90, gapX: 6, gapWidth: 9 }, { z: -135, gapX: -6, gapWidth: 9 },
+      { z: -180, gapX: 0, gapWidth: 9, gapY: 18, gapHeight: 14 }, { z: -225, gapX: 0, gapWidth: 9, gapY: 0, gapHeight: 14 },
+      { z: -270, gapX: 6, gapWidth: 9 }, { z: -315, gapX: -6, gapWidth: 9 }, { z: -360, gapX: 0, gapWidth: 12 },
+    ],
+    obstacles: [
+      { z: -22, x: 5, y: 9, radius: 1.6 }, { z: -67, x: -5, y: 11, radius: 1.6 }, { z: -112, x: 4, y: 6, radius: 1.5 },
+      { z: -292, x: -4, y: 12, radius: 1.6 }, { z: -337, x: 5, y: 7, radius: 1.5 }, { z: -380, x: -3, y: 10, radius: 1.7 },
+    ],
+    theme: {
+      sky: ['#0b0b2a', '#2a2a55', '#7a5a7a', '#e2895a'], fog: 0x5a4a6a,
+      ambient: [0x8fa0cc, 0.55], sun: [0xffb173, 1.3], rim: [0x445577, 0.35],
+      grass: ['#3a4a26', '#33421f', '#46592e'], rock: ['#6e6459', 40, 30, 20], water: ['#1c6fb0', 0x0c3a63],
+    } },
+]
+const params = new URLSearchParams(location.search)
+const levelIdx = Math.max(0, Math.min(LEVELS.length - 1, (parseInt(params.get('level')) || 1) - 1))
+const level = LEVELS[levelIdx]
+const theme = level.theme
+
 const CORRIDOR_BOTTOM = -10, CORRIDOR_TOP = 30, CORRIDOR_HEIGHT = CORRIDOR_TOP - CORRIDOR_BOTTOM
 const CORRIDOR_HALF_WIDTH = 14
 const CRUISE_Y = 8          // default/starting altitude - the vertical center most gates are built around
 const GATE_THICKNESS = 6    // how deep (along z) each gate's frame geometry/collision zone is
-const MAZE = [
-  { z: -45, gapX: 0, gapWidth: 12 },                                  // straight & wide - warm-up
-  { z: -90, gapX: 6, gapWidth: 9 },                                   // gentle bank right
-  { z: -135, gapX: -6, gapWidth: 9 },                                 // gentle bank left
-  { z: -180, gapX: 0, gapWidth: 9, gapY: 18, gapHeight: 14 },         // climb
-  { z: -225, gapX: 0, gapWidth: 9, gapY: 0, gapHeight: 14 },          // dive
-  { z: -270, gapX: 6, gapWidth: 9 },                                  // gentle bank right
-  { z: -315, gapX: -6, gapWidth: 9 },                                 // gentle bank left
-  { z: -360, gapX: 0, gapWidth: 12 },                                 // straight & wide - finish approach
-]
-for (const g of MAZE) { g.hit = false; g.scored = false } // runtime state, reset each run in resetFlight(); g.constrained is set below once its rock mass is built
-const FINISH_Z = -400        // past the last gate; crossing this triggers the celebration
-const CELEBRATE_MS = 3000    // how long the celebration plays before looping back to the start
+const MAZE = level.maze.map((g) => ({ ...g, hit: false, scored: false })) // g.constrained is set below once its rock mass is built
+const FINISH_Z = level.finishZ // past the last gate; crossing this triggers the celebration
+const CELEBRATE_MS = 3000    // how long the celebration plays before advancing to the next level
 
 // ---- Obstacles: freestanding boulders to steer around, separate from the MAZE gates - placed off-center
 // with generous clearance to either side (same "easy for young kids" philosophy as MAZE), skipped near the
-// already-trickier climb/dive gates so difficulty doesn't stack. hit/scored are runtime state, reset each
-// run in resetFlight(): hit becomes true on any collision with that boulder; scored fires once, the first
-// time the creature's z passes it, and only awards points if it was never hit. ----
-const OBSTACLES = [
-  { z: -22, x: 5, y: 9, radius: 1.6 },
-  { z: -67, x: -5, y: 11, radius: 1.6 },
-  { z: -112, x: 4, y: 6, radius: 1.5 },
-  { z: -292, x: -4, y: 12, radius: 1.6 },
-  { z: -337, x: 5, y: 7, radius: 1.5 },
-  { z: -380, x: -3, y: 10, radius: 1.7 },
-].map((o) => ({ ...o, hit: false, scored: false }))
+// already-trickier climb/dive gates so difficulty doesn't stack. hit/scored are runtime state (fresh each
+// page load, since a new level is a full navigation, not a reset): hit becomes true on any collision with
+// that boulder; scored fires once, the first time the creature's z passes it, and only awards points if it
+// was never hit. ----
+const OBSTACLES = level.obstacles.map((o) => ({ ...o, hit: false, scored: false }))
 const SCORE_OBSTACLE = 10, SCORE_GATE = 15 // points for a clean dodge / a clean pass through a bridge or hill gate
 
 // ---- Stage B tuning: all easily retunable from here, matching tv-app/index.html's CONFIG convention.
@@ -167,17 +218,13 @@ function tiledTexture(size, repeatX, repeatY, draw) {
 }
 const skyTex = canvasTexture(2, 256, (ctx, w, h) => { // tall vertical strip, canvas Y 0=top=zenith
   const g = ctx.createLinearGradient(0, 0, 0, h)
-  g.addColorStop(0, '#0b0b2a')   // zenith - deep night-indigo
-  g.addColorStop(0.55, '#2a2a55') // mid sky
-  g.addColorStop(0.8, '#7a5a7a')  // dusk haze
-  g.addColorStop(1, '#e2895a')    // horizon - warm sunset orange
+  g.addColorStop(0, theme.sky[0]); g.addColorStop(0.55, theme.sky[1]); g.addColorStop(0.8, theme.sky[2]); g.addColorStop(1, theme.sky[3])
   ctx.fillStyle = g; ctx.fillRect(0, 0, w, h)
 })
 
 const scene = new THREE.Scene()
 scene.background = skyTex
-const FOG_COLOR = 0x5a4a6a // matches the sky gradient's dusk-haze band, so distant terrain fades into the sky instead of a mismatched flat color
-scene.fog = new THREE.Fog(FOG_COLOR, 60, 180)
+scene.fog = new THREE.Fog(theme.fog, 60, 180) // matches the sky gradient's haze band, so distant terrain fades into the sky instead of a mismatched flat color
 
 const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500)
 camera.position.copy(CHASE_OFFSET) // third-person chase view: behind and slightly above the creature
@@ -191,14 +238,14 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight)
 })
 
-// Dusk lighting to match the sky gradient: a warm "setting sun" key light, a cool blue ambient fill (the sky's
-// own bounce light), and a dim cool rim light from behind for a bit of edge separation - no shadow maps (real
+// Per-theme lighting to match the sky gradient: a colored key "sun" light, a colored ambient fill (the sky's
+// own bounce light), and a dim rim light from behind for a bit of edge separation - no shadow maps (real
 // per-object shadow casting is expensive and frame rate on the target TV hardware is already an open question).
-scene.add(new THREE.AmbientLight(0x8fa0cc, 0.55))
-const sun = new THREE.DirectionalLight(0xffb173, 1.3)
+scene.add(new THREE.AmbientLight(...theme.ambient))
+const sun = new THREE.DirectionalLight(...theme.sun)
 sun.position.set(15, 25, 10)
 scene.add(sun)
-const rim = new THREE.DirectionalLight(0x445577, 0.35)
+const rim = new THREE.DirectionalLight(...theme.rim)
 rim.position.set(-10, 10, -15)
 scene.add(rim)
 
@@ -219,8 +266,8 @@ function noise2(x, y) {
 }
 
 const grassTex = tiledTexture(64, 20, 40, (ctx, s) => {
-  ctx.fillStyle = '#3a4a26'; ctx.fillRect(0, 0, s, s)
-  for (let i = 0; i < 400; i++) { ctx.fillStyle = Math.random() < 0.5 ? '#33421f' : '#46592e'; ctx.fillRect(Math.random() * s, Math.random() * s, 2, 2) }
+  ctx.fillStyle = theme.grass[0]; ctx.fillRect(0, 0, s, s)
+  for (let i = 0; i < 400; i++) { ctx.fillStyle = Math.random() < 0.5 ? theme.grass[1] : theme.grass[2]; ctx.fillRect(Math.random() * s, Math.random() * s, 2, 2) }
 })
 const floorLen = -FINISH_Z + 40
 const floorGeo = new THREE.PlaneGeometry(CORRIDOR_HALF_WIDTH * 2 + 60, floorLen, 32, 64)
@@ -248,13 +295,13 @@ function gapXAt(z) {
 }
 const riverX = gapXAt
 const waterTex = tiledTexture(64, 1, 90, (ctx, s) => {
-  ctx.fillStyle = '#1c6fb0'; ctx.fillRect(0, 0, s, s)
+  ctx.fillStyle = theme.water[0]; ctx.fillRect(0, 0, s, s)
   ctx.strokeStyle = 'rgba(255,255,255,0.3)'
   for (let i = 0; i < 40; i++) { const y = Math.random() * s; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(s, y + Math.random() * 6 - 3); ctx.stroke() }
 })
-// emissive keeps the water reading as blue regardless of the warm dusk lighting - without it, the sunset key
-// light washed the river out to a flat stone-gray, same as everything else it touches.
-const riverMat = new THREE.MeshStandardMaterial({ map: waterTex, roughness: 0.25, emissive: 0x0c3a63, emissiveIntensity: 0.6 })
+// emissive keeps the water reading as its own color regardless of the theme's key light - without it, a warm
+// key light washes the river out to a flat stone-gray, same as everything else it touches (found on Dusk Peaks).
+const riverMat = new THREE.MeshStandardMaterial({ map: waterTex, roughness: 0.25, emissive: theme.water[1], emissiveIntensity: 0.6 })
 for (let z = 15; z > FINISH_Z - 15; z -= 13) {
   const seg = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.1, 14), riverMat)
   seg.position.set(riverX(z), CORRIDOR_BOTTOM + 2.8, z) // ground noise amplitude tops out at 1.8+0.6=2.4 (see floorPos loop above) - stay clear of that or the river gets buried under a bump
@@ -283,8 +330,9 @@ for (let z = 10; z > FINISH_Z - 10; z -= 16) { // ponytail: sparse on purpose - 
 // sides, well above the flyable corridor (CORRIDOR_TOP) so they're pure backdrop, never collidable. Taller
 // peaks get a small white snow cap. rockMat is reused below by addRockMass() for the collidable obstacles.
 const rockTex = tiledTexture(64, 3, 3, (ctx, s) => {
-  ctx.fillStyle = '#6e6459'; ctx.fillRect(0, 0, s, s)
-  for (let i = 0; i < 500; i++) { const v = 60 + Math.random() * 60; ctx.fillStyle = `rgb(${v + 40},${v + 30},${v + 20})`; ctx.fillRect(Math.random() * s, Math.random() * s, 3, 3) }
+  const [base, dr, dg, db] = theme.rock
+  ctx.fillStyle = base; ctx.fillRect(0, 0, s, s)
+  for (let i = 0; i < 500; i++) { const v = 60 + Math.random() * 60; ctx.fillStyle = `rgb(${v + dr},${v + dg},${v + db})`; ctx.fillRect(Math.random() * s, Math.random() * s, 3, 3) }
 })
 const rockMat = new THREE.MeshStandardMaterial({ map: rockTex, roughness: 0.95 })
 const snowMat = new THREE.MeshStandardMaterial({ color: 0xf0f2f5, roughness: 0.8 })
@@ -437,16 +485,7 @@ scene.add(creature)
 // ---- Flight physics state ----
 let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED, wingRate = 0 // wingRate: 0-1 flap intensity that drives lift; the wing visual is driven separately, see updateWings()
 let finished = false, finishAt = 0
-let score = 0
-
-function resetFlight() {
-  creature.position.set(0, CRUISE_Y, 0)
-  bank = pitch = vy = wingRate = 0; speed = MIN_SPEED; finished = false; score = 0
-  for (const g of MAZE) { g.hit = false; g.scored = false }
-  for (const o of OBSTACLES) { o.hit = false; o.scored = false }
-  banner.style.display = 'none'
-  for (const p of confetti.splice(0)) scene.remove(p.mesh)
-}
+let score = Math.max(0, parseInt(params.get('score')) || 0) // carried forward from the previous level, see the finish handler below
 
 // The gate whose collision zone the creature is currently inside (z within GATE_THICKNESS/2 of a gate's z),
 // or null between gates - most of the corridor is open flying space with nothing to collide with.
@@ -534,10 +573,14 @@ function stepPhysics(dt) {
     }
   }
 
-  // Finish: crossing the end of the maze celebrates, then loops back to the start after a pause.
+  // Finish: crossing the end of the level celebrates, then advances to the next level after a pause (wrapping
+  // back to level 1 - and a fresh score - after the last one), a full page navigation since each level is a
+  // genuinely different maze/theme, not just a state reset. See tick() for the actual navigation.
   if (!finished && creature.position.z < FINISH_Z) {
     finished = true; finishAt = performance.now()
-    banner.textContent = `🎉 You flew the canyon! Score ${score} 🎉`; banner.style.display = 'flex'
+    const isLast = levelIdx === LEVELS.length - 1
+    banner.textContent = `🎉 ${level.name} complete! Score ${score} 🎉` + (isLast ? '\nBack to Green Valley!' : `\nOn to ${LEVELS[levelIdx + 1].name}!`)
+    banner.style.display = 'flex'
     spawnConfetti(creature.position)
   }
 }
@@ -606,7 +649,7 @@ window.DEBUG = {
   get physics() { return { bank, pitch, speed, vy } },
   get finished() { return finished },
   get score() { return score },
-  MAZE, OBSTACLES, // exposed for testing - runtime hit/scored state lives on each entry
+  MAZE, OBSTACLES, LEVELS, levelIdx, // exposed for testing - runtime hit/scored state lives on each MAZE/OBSTACLES entry
   get pose() { return { live: poseLive(), poseBank, posePitch, poseFlapRate } },
   get debugVisible() { return debugVisible },
   set debugVisible(v) { debugVisible = !!v; debugEl.style.display = debugVisible ? 'block' : 'none' },
@@ -616,13 +659,20 @@ window.DEBUG = {
 let last = performance.now()
 function tick(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now
-  if (finished) { if (now - finishAt > CELEBRATE_MS) resetFlight() }
+  if (finished) {
+    if (now - finishAt > CELEBRATE_MS) {
+      const isLast = levelIdx === LEVELS.length - 1
+      const nextLevel = isLast ? 1 : levelIdx + 2 // levelIdx is 0-based, the URL param is 1-based
+      const nextScore = isLast ? 0 : score // a fresh run once you've cycled through every level, otherwise carry the score forward
+      location.href = `flight-test.html?level=${nextLevel}&score=${nextScore}`
+    }
+  }
   else stepPhysics(dt)
   updateWings(now)
   updateConfetti(dt)
   updateDebugOverlay()
   waterTex.offset.y -= dt * 0.4 // scrolling texture offset - a flowing-water look for the price of one number per frame
-  scoreEl.textContent = `Score: ${score}`
+  scoreEl.textContent = `Level ${levelIdx + 1}: ${level.name}   Score: ${score}`
   camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
   camera.lookAt(creature.position.x, creature.position.y + 0.5, creature.position.z)
   renderer.render(scene, camera)

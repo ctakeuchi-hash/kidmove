@@ -5,7 +5,7 @@ Your phone's camera tracks your body → the server relays it → a TV-connected
 **Games**
 - **Trace** (arm-writing): capital letters (ABC), small letters (abc), numbers (123), Japanese **hiragana** (あ) and **katakana** (ア). Follow the numbered start dot and arrows, stroke by stroke, in the right order and direction. Practice a subset (vowels/consonants, or a kana row) and shuffle the order; each character shows a picture+word clue while you trace it.
 - **Jump Dodge**: jump over spikes.
-- **Alicorn Flight**: fly through a mountain landscape - bank/pitch with your arms (or keyboard) and flap to climb. Dodge freestanding boulders and thread bridge/hill gates cleanly for points; hitting one just bounces you gently, no fail state.
+- **Alicorn Flight**: fly through a mountain landscape - bank/pitch with your arms (or keyboard) and flap to climb. Dodge freestanding boulders and thread bridge/hill gates cleanly for points; hitting one just bounces you gently, no fail state. 4 levels of increasing difficulty, each its own themed landscape (Green Valley → Red Canyon → Snowy Peaks → Dusk Peaks), auto-advancing on finish and carrying your score forward - loops back to Green Valley with a fresh score after Dusk Peaks. `?level=2` jumps straight to a level.
 - **1 or 2 players**: in Trace, two people (one on each side of the room) trace the same character together; it counts as done when both finish.
 
 ## What you need
