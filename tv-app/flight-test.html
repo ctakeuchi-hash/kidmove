@@ -176,14 +176,16 @@ for (let z = 15; z > FINISH_Z - 15; z -= 13) {
   scene.add(seg)
 }
 
-// Trees: simple cone+cylinder, scattered just outside the flyable corridor on both sides.
+// Trees: simple cone+cylinder, scattered just outside the flyable corridor on both sides. Segment counts are
+// high enough to read as round/smooth rather than faceted low-poly - it's still just a cone and a cylinder,
+// no new geometry system needed for that.
 const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5b3a22, roughness: 0.9 })
 const leafMat = new THREE.MeshStandardMaterial({ color: 0x2f6b34, roughness: 0.8 })
 function addTree(x, z, scale) {
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25 * scale, 0.3 * scale, 1.6 * scale, 6), trunkMat)
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.25 * scale, 0.3 * scale, 1.6 * scale, 12), trunkMat)
   trunk.position.set(x, CORRIDOR_BOTTOM + 0.8 * scale, z)
   scene.add(trunk)
-  const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.1 * scale, 2.4 * scale, 7), leafMat)
+  const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.1 * scale, 2.4 * scale, 14), leafMat)
   leaves.position.set(x, CORRIDOR_BOTTOM + 2.2 * scale, z)
   scene.add(leaves)
 }
@@ -192,24 +194,42 @@ for (let z = 10; z > FINISH_Z - 10; z -= 16) { // ponytail: sparse on purpose - 
   addTree(-CORRIDOR_HALF_WIDTH - 1.5 - Math.random() * 3, z + Math.random() * 4, 0.7 + Math.random() * 0.6)
 }
 
-// Mountains: a continuous jagged skyline of cone peaks along both sides, well above the flyable corridor
-// (CORRIDOR_TOP) so they're pure backdrop, never collidable. Taller peaks get a small white snow cap.
+// Mountains: a continuous jagged skyline of smooth (high-segment, not low-poly-faceted) cone peaks along both
+// sides, well above the flyable corridor (CORRIDOR_TOP) so they're pure backdrop, never collidable. Taller
+// peaks get a small white snow cap. addSpire() reuses the same look at a fixed, narrower size for the gate
+// overpass supports below, instead of scaling a background peak's radius (which is wide relative to a gap).
 const rockMat = new THREE.MeshStandardMaterial({ color: 0x6e6459, roughness: 0.95 })
 const snowMat = new THREE.MeshStandardMaterial({ color: 0xf0f2f5, roughness: 0.8 })
-function addPeak(x, z, h) {
-  const peak = new THREE.Mesh(new THREE.ConeGeometry(h * 0.55, h, 6), rockMat)
+function addPeak(x, z, h, radius = h * 0.55) {
+  const peak = new THREE.Mesh(new THREE.ConeGeometry(radius, h, 16), rockMat)
   peak.position.set(x, CORRIDOR_BOTTOM + h / 2, z)
   scene.add(peak)
   if (h > 26) { // snow cap: a smaller cone centered near the peak's apex, mostly embedded so it reads as a cap
     const capH = h * 0.3
-    const cap = new THREE.Mesh(new THREE.ConeGeometry(h * 0.55 * 0.3, capH, 6), snowMat)
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(radius * 0.3, capH, 16), snowMat)
     cap.position.set(x, CORRIDOR_BOTTOM + h - capH * 0.3, z)
     scene.add(cap)
   }
 }
+const addSpire = (x, z, h) => addPeak(x, z, h, 1.4) // narrow mountain spire flanking a gate gap - see MAZE loop below
 for (let z = 25; z > FINISH_Z - 25; z -= 26) {
   addPeak(CORRIDOR_HALF_WIDTH + 6 + Math.random() * 10, z + Math.random() * 8, 24 + Math.random() * 20)
   addPeak(-CORRIDOR_HALF_WIDTH - 6 - Math.random() * 10, z + Math.random() * 8, 24 + Math.random() * 20)
+}
+
+// Clouds: a few overlapping smooth spheres per cluster, semi-transparent so they stay soft/fluffy rather than
+// looking like solid rocks. Not part of MAZE/currentGate(), so collision never checks against them - the
+// player flies straight through, by design ("clouds you can't run into").
+const cloudMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, transparent: true, opacity: 0.85 })
+function addCloud(x, y, z, scale) {
+  for (const [dx, dy, dz, r] of [[0, 0, 0, 1], [0.8, 0.15, 0.3, 0.75], [-0.9, 0.1, -0.2, 0.7], [0.2, 0.35, -0.6, 0.6]]) {
+    const puff = new THREE.Mesh(new THREE.SphereGeometry(r * scale, 12, 8), cloudMat)
+    puff.position.set(x + dx * scale, y + dy * scale, z + dz * scale)
+    scene.add(puff)
+  }
+}
+for (let z = 20; z > FINISH_Z - 20; z -= 45) {
+  addCloud((Math.random() - 0.5) * CORRIDOR_HALF_WIDTH * 1.6, CRUISE_Y + 6 + Math.random() * 10, z + Math.random() * 15, 1.5 + Math.random())
 }
 
 const gateMat = new THREE.MeshStandardMaterial({ color: 0x8a6a4f, roughness: 0.95 })
@@ -227,13 +247,14 @@ for (const g of MAZE) {
   addBox(g.gapWidth, (gapY - gapHeight / 2) - CORRIDOR_BOTTOM, g.gapX, (CORRIDOR_BOTTOM + (gapY - gapHeight / 2)) / 2, g.z) // rocky hill (climb gates)
   const ceilingH = CORRIDOR_TOP - (gapY + gapHeight / 2)
   addBox(g.gapWidth, ceilingH, g.gapX, (CORRIDOR_TOP + (gapY + gapHeight / 2)) / 2, g.z) // stone overpass span (dive gates)
-  // Overpass pillars: only a real "duck under this" ceiling riser (dive gates) gets visible stone supports
-  // down to the ground on both sides of the gap, so the span above reads as a bridge, not a slab floating in
-  // mid-air. Climb gates also get a thin ceiling cap above (harmless), but it's too small to need pillars.
+  // Overpass supports: only a real "duck under this" ceiling riser (dive gates) gets mountain spires flanking
+  // the gap, reaching up from the ground to the span above - so it reads as a natural rock pass between two
+  // peaks, not a slab floating in mid-air. Climb gates also get a thin ceiling cap above (harmless), but it's
+  // too small to need supports.
   if (ceilingH > 10) {
-    const pillar = (x) => { const m = new THREE.Mesh(new THREE.BoxGeometry(1.2, CORRIDOR_HEIGHT - ceilingH, GATE_THICKNESS * 0.7), gateMat); m.position.set(x, CORRIDOR_BOTTOM + (CORRIDOR_HEIGHT - ceilingH) / 2, g.z); scene.add(m) }
-    pillar(g.gapX - g.gapWidth / 2 + 0.6)
-    pillar(g.gapX + g.gapWidth / 2 - 0.6)
+    const spireH = CORRIDOR_HEIGHT - ceilingH
+    addSpire(g.gapX - g.gapWidth / 2 + 1.4, g.z, spireH)
+    addSpire(g.gapX + g.gapWidth / 2 - 1.4, g.z, spireH)
   }
 }
 
@@ -255,13 +276,13 @@ function buildAlicorn() {
   add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.85, 0.5), coat), 0, 1.35, -1.25, 0.55) // neck
   add(new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.4, 0.55), coat), 0, 1.85, -1.75) // head
   add(new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.2, 0.35), coat), 0, 1.78, -2.05) // snout
-  add(new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 4), coat), -0.14, 2.1, -1.7, -0.3) // ears
-  add(new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 4), coat), 0.14, 2.1, -1.7, -0.3)
-  add(new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.5, 6), gold), 0, 2.15, -1.95, -0.35) // horn, angled forward
+  add(new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 10), coat), -0.14, 2.1, -1.7, -0.3) // ears
+  add(new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 10), coat), 0.14, 2.1, -1.7, -0.3)
+  add(new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.5, 12), gold), 0, 2.15, -1.95, -0.35) // horn, angled forward
   for (let i = 0; i < 5; i++) add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.22, 0.14), mane), 0, 1.55 + i * 0.05, -1.55 + i * 0.28) // mane ridge
-  add(new THREE.Mesh(new THREE.ConeGeometry(0.18, 1.0, 6), mane), 0, 0.9, 1.35, Math.PI / 2 + 0.5) // tail
+  add(new THREE.Mesh(new THREE.ConeGeometry(0.18, 1.0, 12), mane), 0, 0.9, 1.35, Math.PI / 2 + 0.5) // tail
   for (const [x, z] of [[-0.32, -0.7], [0.32, -0.7], [-0.32, 0.7], [0.32, 0.7]]) { // legs, tucked back (flying pose)
-    add(new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.06, 0.7, 6), coat), x, 0.45, z, 0.5)
+    add(new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.06, 0.7, 10), coat), x, 0.45, z, 0.5)
     add(new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.12, 0.2), hoof), x, 0.15, z + 0.3)
   }
 
