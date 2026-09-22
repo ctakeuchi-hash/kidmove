@@ -18,20 +18,17 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/"
+    "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js"
   }
 }
 </script>
 <script type="module">
 import * as THREE from 'three'
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 
-// ponytail: placeholder rigged bird (one of three.js's own long-standing bundled demo assets) stands in for
-// the alicorn until Stage F swaps in a real rigged unicorn/pegasus - proves the load+animate+render pipeline
-// first, exactly as Stage A calls for. Swap CREATURE_URL for the real asset later; no other code should need
-// to change (GLTFLoader + AnimationMixer usage is asset-agnostic).
-const CREATURE_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r169/examples/models/gltf/Parrot.glb'
+// ponytail: a hand-built low-poly alicorn (primitive box/cone/cylinder geometry, same "simple flat colors"
+// style as the canyon gates below) instead of a loaded model - no rigged, clearly-licensed, freely-hotlinkable
+// unicorn/pegasus asset exists, and building it directly means the wings can be driven straight from the
+// player's real arm angle (see updateWings()) instead of scrubbing a baked animation clip. See buildAlicorn().
 const CHASE_OFFSET = new THREE.Vector3(0, 3, 9) // camera position relative to the creature
 
 // ---- Stage C maze: a plain array of gate definitions, so new layouts are just data - no rendering/physics
@@ -104,7 +101,6 @@ let lastPoseAt = -1e9, poseBank = 0, posePitch = 0, poseFlapRate = 0
 let lastBody = null // raw keypoints from the most recent pose, kept only for the debug overlay
 const wristYHistory = [] // rolling {t, y} window used to measure how fast the wrists are currently moving
 const clamp1 = (v) => Math.max(-1, Math.min(1, v))
-const clamp01 = (v) => Math.max(0, Math.min(1, v))
 
 // b = the phone's full body keypoint array, in phone-app's BODY order: [nose, Lsh, Rsh, Lel, Rel, Lwr, Rwr, Lhip, Rhip, ...]
 function onPose(b) {
@@ -182,24 +178,56 @@ for (const g of MAZE) {
   addBox(g.gapWidth, CORRIDOR_TOP - (gapY + gapHeight / 2), g.gapX, (CORRIDOR_TOP + (gapY + gapHeight / 2)) / 2, g.z)     // ceiling riser (dive gates)
 }
 
-// ---- Creature: loads async. Its wing-flap clip is scrubbed by hand (see tick()) instead of just looped, so
-// the wings visually mirror the player's actual arm position frame by frame, not an independent animation rate. ----
-let mixer, creature, wingAction
-new GLTFLoader().load(CREATURE_URL, (gltf) => {
-  creature = gltf.scene
-  creature.scale.setScalar(0.04) // Parrot.glb is modeled much larger than our scene units
-  creature.position.set(0, CRUISE_Y, 0)
-  creature.rotation.y = Math.PI // face away from the camera, down the canyon (its direction of travel)
-  scene.add(creature)
-  if (gltf.animations.length) {
-    mixer = new THREE.AnimationMixer(creature)
-    wingAction = mixer.clipAction(gltf.animations[0]).play()
-  } else {
-    document.getElementById('hint').textContent += ' (model has no animation clips)'
+// ---- Creature: a horse body with bird wings, built from primitive geometry (boxes/cones/cylinders), same
+// "simple flat colors" style as the canyon gates above. Faces -Z directly (its direction of travel), so no
+// load step or extra facing rotation is needed. Sizes are a best guess against CREATURE_RADIUS/CHASE_OFFSET
+// below, not visually tuned - adjust once you can see it on a real screen. ----
+function buildAlicorn() {
+  const g = new THREE.Group()
+  const coat = new THREE.MeshStandardMaterial({ color: 0xf3ecff, roughness: 0.8 })
+  const hoof = new THREE.MeshStandardMaterial({ color: 0x33303c, roughness: 0.9 })
+  const gold = new THREE.MeshStandardMaterial({ color: 0xffd23f, roughness: 0.4, metalness: 0.3 })
+  const mane = new THREE.MeshStandardMaterial({ color: 0xb968e3, roughness: 0.7 })
+  const feather = new THREE.MeshStandardMaterial({ color: 0xdff0ff, roughness: 0.7 })
+  const featherTip = new THREE.MeshStandardMaterial({ color: 0x8fc7ea, roughness: 0.7 })
+  const add = (mesh, x, y, z, rx = 0) => { mesh.position.set(x, y, z); mesh.rotation.x = rx; g.add(mesh) }
+
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.8, 2.2), coat), 0, 0.9, 0) // body
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.85, 0.5), coat), 0, 1.35, -1.25, 0.55) // neck
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.4, 0.55), coat), 0, 1.85, -1.75) // head
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.2, 0.35), coat), 0, 1.78, -2.05) // snout
+  add(new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 4), coat), -0.14, 2.1, -1.7, -0.3) // ears
+  add(new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 4), coat), 0.14, 2.1, -1.7, -0.3)
+  add(new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.5, 6), gold), 0, 2.15, -1.95, -0.35) // horn, angled forward
+  for (let i = 0; i < 5; i++) add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.22, 0.14), mane), 0, 1.55 + i * 0.05, -1.55 + i * 0.28) // mane ridge
+  add(new THREE.Mesh(new THREE.ConeGeometry(0.18, 1.0, 6), mane), 0, 0.9, 1.35, Math.PI / 2 + 0.5) // tail
+  for (const [x, z] of [[-0.32, -0.7], [0.32, -0.7], [-0.32, 0.7], [0.32, 0.7]]) { // legs, tucked back (flying pose)
+    add(new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.06, 0.7, 6), coat), x, 0.45, z, 0.5)
+    add(new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.12, 0.2), hoof), x, 0.15, z + 0.3)
   }
-}, undefined, (err) => {
-  document.getElementById('hint').textContent = 'Failed to load creature model: ' + err.message
-})
+
+  // Wings: bird-style - a flat "arm" panel plus fanned primary feathers, mounted on a shoulder pivot Group so
+  // the whole assembly rotates together for the flap (see updateWings()). side: 1 = right (+X), -1 = left (-X).
+  function buildWing(side) {
+    const pivot = new THREE.Group()
+    pivot.position.set(side * 0.4, 1.05, -0.3)
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.06, 0.5), feather)
+    arm.position.set(side * 0.55, 0, 0.05)
+    pivot.add(arm)
+    for (let i = 0; i < 4; i++) {
+      const f = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.05, 0.15), i === 3 ? featherTip : feather)
+      f.position.set(side * (1.05 + i * 0.22), 0, 0.35 + i * 0.14)
+      f.rotation.y = side * (0.15 + i * 0.05)
+      pivot.add(f)
+    }
+    g.add(pivot)
+    return pivot
+  }
+  return { group: g, wingR: buildWing(1), wingL: buildWing(-1) }
+}
+const { group: creature, wingR, wingL } = buildAlicorn()
+creature.position.set(0, CRUISE_Y, 0)
+scene.add(creature)
 
 // ---- Flight physics state ----
 let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED, wingRate = 0 // wingRate: 0-1 flap intensity that drives lift; the wing visual is driven separately, see updateWings()
@@ -275,23 +303,18 @@ function stepPhysics(dt) {
   }
 }
 
-// Wings mirror the player's actual arm position frame by frame (scrubbed directly to a clip time), not an
-// independently-looping animation - so a still arm means a still wing, and moving your arm up/down visibly
-// moves the wing up/down in step, not just "faster/slower". Keyboard mode has no arm position to mirror, so
-// it falls back to looping while Space is held (WING_TIME_SIGN: flip to -1 if arms-up ever looks wings-down
-// once tested against the real clip on real hardware).
-const WING_TIME_SIGN = 1
-function updateWings(dt) {
-  if (!wingAction) return
-  const dur = wingAction.getClip().duration
-  if (poseLive()) {
-    const raise = clamp01((WING_TIME_SIGN * posePitch + 1) / 2) // posePitch: -1 arms down .. +1 arms up
-    wingAction.paused = true; wingAction.time = raise * dur
-    mixer.update(0) // apply the scrubbed time without advancing it
-  } else {
-    wingAction.paused = false; wingAction.timeScale = held(' ') ? 1 : 0
-    mixer.update(dt)
-  }
+// Wings mirror the player's actual arm position frame by frame (direct rotation, not a playback rate) - so a
+// still arm means a still wing, and moving your arm up/down visibly moves the wing up/down in step. Keyboard
+// mode has no arm position to mirror, so it falls back to a simple loop while Space is held.
+const MAX_WING_ANGLE = 0.9 // radians of shoulder rotation at full arm extension (~50 degrees)
+const WING_TIME_SIGN = 1   // flip to -1 if arms-up ever looks wings-down once tested on real hardware
+const KEY_FLAP_HZ = 2.2    // keyboard-only fallback flap speed while Space is held
+function updateWings(now) {
+  const angle = poseLive()
+    ? WING_TIME_SIGN * posePitch * MAX_WING_ANGLE // posePitch: -1 arms down .. +1 arms up
+    : (held(' ') ? Math.sin(now / 1000 * KEY_FLAP_HZ * 2 * Math.PI) * MAX_WING_ANGLE : 0)
+  wingR.rotation.z = angle
+  wingL.rotation.z = -angle
 }
 
 // ---- Confetti: a handful of small colored boxes that pop out and fall - the 3D equivalent of the 2D
@@ -351,15 +374,13 @@ window.DEBUG = {
 let last = performance.now()
 function tick(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now
-  if (creature) {
-    if (finished) { if (now - finishAt > CELEBRATE_MS) resetFlight() }
-    else stepPhysics(dt)
-    updateWings(dt)
-    updateConfetti(dt)
-    updateDebugOverlay()
-    camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
-    camera.lookAt(creature.position.x, creature.position.y + 0.5, creature.position.z)
-  }
+  if (finished) { if (now - finishAt > CELEBRATE_MS) resetFlight() }
+  else stepPhysics(dt)
+  updateWings(now)
+  updateConfetti(dt)
+  updateDebugOverlay()
+  camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
+  camera.lookAt(creature.position.x, creature.position.y + 0.5, creature.position.z)
   renderer.render(scene, camera)
   requestAnimationFrame(tick)
 }
