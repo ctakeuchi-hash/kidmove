@@ -5,6 +5,7 @@ Your phone's camera tracks your body → the server relays it → a TV-connected
 **Games**
 - **Trace** (arm-writing): capital letters (ABC), small letters (abc), numbers (123), Japanese **hiragana** (あ) and **katakana** (ア). Follow the numbered start dot and arrows, stroke by stroke, in the right order and direction. Practice a subset (vowels/consonants, or a kana row) and shuffle the order; each character shows a picture+word clue while you trace it.
 - **Jump Dodge**: jump over spikes.
+- **Alicorn Flight**: fly a bird through a canyon of gates, banking/pitching with your arms (or keyboard) and flapping to climb.
 - **1 or 2 players**: in Trace, two people (one on each side of the room) trace the same character together; it counts as done when both finish.
 
 ## What you need
