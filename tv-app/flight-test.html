@@ -255,8 +255,12 @@ for (const g of MAZE) {
   const floorH = (gapY - gapHeight / 2) - CORRIDOR_BOTTOM, ceilingH = CORRIDOR_TOP - (gapY + gapHeight / 2)
   addRockMass((-CORRIDOR_HALF_WIDTH + leftEdge) / 2, leftEdge - (-CORRIDOR_HALF_WIDTH), CORRIDOR_BOTTOM, CORRIDOR_HEIGHT, g.z) // left mountain wall
   addRockMass((rightEdge + CORRIDOR_HALF_WIDTH) / 2, CORRIDOR_HALF_WIDTH - rightEdge, CORRIDOR_BOTTOM, CORRIDOR_HEIGHT, g.z) // right mountain wall
-  addRockMass(g.gapX, g.gapWidth, CORRIDOR_BOTTOM, floorH, g.z) // rocky hill you climb over (climb gates)
-  addRockMass(g.gapX, g.gapWidth, gapY + gapHeight / 2, ceilingH, g.z) // mountain ridge you duck under (dive gates)
+  // Floor/ceiling risers only render past a real height (>8) - CRUISE_Y (8) isn't exactly the corridor's
+  // vertical center (10), so an unconstrained "straight" gate leaves a tiny few-unit residual on the default
+  // side, harmless as a thin flat sliver but very visible as chunky cones spanning the whole gap width. Only
+  // climb/dive gates clear this threshold; straight gates correctly render nothing on the small side.
+  if (floorH > 8) addRockMass(g.gapX, g.gapWidth, CORRIDOR_BOTTOM, floorH, g.z) // rocky hill you climb over (climb gates)
+  if (ceilingH > 8) addRockMass(g.gapX, g.gapWidth, gapY + gapHeight / 2, ceilingH, g.z) // mountain ridge you duck under (dive gates)
 }
 
 // ---- Creature: a horse body with bird wings, built from primitive geometry (boxes/cones/cylinders), same
