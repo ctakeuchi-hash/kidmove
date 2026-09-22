@@ -104,6 +104,7 @@ let lastPoseAt = -1e9, poseBank = 0, posePitch = 0, poseFlapRate = 0
 let lastBody = null // raw keypoints from the most recent pose, kept only for the debug overlay
 const wristYHistory = [] // rolling {t, y} window used to measure how fast the wrists are currently moving
 const clamp1 = (v) => Math.max(-1, Math.min(1, v))
+const clamp01 = (v) => Math.max(0, Math.min(1, v))
 
 // b = the phone's full body keypoint array, in phone-app's BODY order: [nose, Lsh, Rsh, Lel, Rel, Lwr, Rwr, Lhip, Rhip, ...]
 function onPose(b) {
@@ -181,8 +182,9 @@ for (const g of MAZE) {
   addBox(g.gapWidth, CORRIDOR_TOP - (gapY + gapHeight / 2), g.gapX, (CORRIDOR_TOP + (gapY + gapHeight / 2)) / 2, g.z)     // ceiling riser (dive gates)
 }
 
-// ---- Creature: loads async, plays its first animation clip on loop ----
-let mixer, creature
+// ---- Creature: loads async. Its wing-flap clip is scrubbed by hand (see tick()) instead of just looped, so
+// the wings visually mirror the player's actual arm position frame by frame, not an independent animation rate. ----
+let mixer, creature, wingAction
 new GLTFLoader().load(CREATURE_URL, (gltf) => {
   creature = gltf.scene
   creature.scale.setScalar(0.04) // Parrot.glb is modeled much larger than our scene units
@@ -191,7 +193,7 @@ new GLTFLoader().load(CREATURE_URL, (gltf) => {
   scene.add(creature)
   if (gltf.animations.length) {
     mixer = new THREE.AnimationMixer(creature)
-    mixer.clipAction(gltf.animations[0]).play()
+    wingAction = mixer.clipAction(gltf.animations[0]).play()
   } else {
     document.getElementById('hint').textContent += ' (model has no animation clips)'
   }
@@ -200,7 +202,7 @@ new GLTFLoader().load(CREATURE_URL, (gltf) => {
 })
 
 // ---- Flight physics state ----
-let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED, wingRate = 0 // wingRate also drives the wing-flap animation speed, see tick()
+let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED, wingRate = 0 // wingRate: 0-1 flap intensity that drives lift; the wing visual is driven separately, see updateWings()
 let finished = false, finishAt = 0
 
 function resetFlight() {
@@ -273,6 +275,25 @@ function stepPhysics(dt) {
   }
 }
 
+// Wings mirror the player's actual arm position frame by frame (scrubbed directly to a clip time), not an
+// independently-looping animation - so a still arm means a still wing, and moving your arm up/down visibly
+// moves the wing up/down in step, not just "faster/slower". Keyboard mode has no arm position to mirror, so
+// it falls back to looping while Space is held (WING_TIME_SIGN: flip to -1 if arms-up ever looks wings-down
+// once tested against the real clip on real hardware).
+const WING_TIME_SIGN = 1
+function updateWings(dt) {
+  if (!wingAction) return
+  const dur = wingAction.getClip().duration
+  if (poseLive()) {
+    const raise = clamp01((WING_TIME_SIGN * posePitch + 1) / 2) // posePitch: -1 arms down .. +1 arms up
+    wingAction.paused = true; wingAction.time = raise * dur
+    mixer.update(0) // apply the scrubbed time without advancing it
+  } else {
+    wingAction.paused = false; wingAction.timeScale = held(' ') ? 1 : 0
+    mixer.update(dt)
+  }
+}
+
 // ---- Confetti: a handful of small colored boxes that pop out and fall - the 3D equivalent of the 2D
 // games' celebration effects, kept simple (no particle system library, plain meshes + gravity). ----
 const confetti = []
@@ -333,7 +354,7 @@ function tick(now) {
   if (creature) {
     if (finished) { if (now - finishAt > CELEBRATE_MS) resetFlight() }
     else stepPhysics(dt)
-    if (mixer) { mixer.timeScale = wingRate; mixer.update(dt) } // wings only animate while actually flapping
+    updateWings(dt)
     updateConfetti(dt)
     updateDebugOverlay()
     camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
