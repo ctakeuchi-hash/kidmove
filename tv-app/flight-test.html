@@ -167,8 +167,18 @@ floor.rotation.x = -Math.PI / 2
 floor.position.set(0, CORRIDOR_BOTTOM, FINISH_Z / 2)
 scene.add(floor)
 
-// River: a gentle, decorative sine-wave ribbon down the middle - not tied to the gates or collision.
-const riverX = (z) => 4 * Math.sin(z * 0.02)
+// River: follows the same left/right path as the flyable gaps (interpolated from MAZE gapX), so it always
+// runs down the valley between the mountain walls instead of an arbitrary path that could cross under one.
+function gapXAt(z) {
+  if (z >= MAZE[0].z) return MAZE[0].gapX
+  if (z <= MAZE[MAZE.length - 1].z) return MAZE[MAZE.length - 1].gapX
+  for (let i = 0; i < MAZE.length - 1; i++) {
+    const a = MAZE[i], b = MAZE[i + 1]
+    if (z <= a.z && z >= b.z) { const t = (a.z - z) / (a.z - b.z); return a.gapX + (b.gapX - a.gapX) * t }
+  }
+  return 0
+}
+const riverX = gapXAt
 const riverMat = new THREE.MeshStandardMaterial({ color: 0x2f7fb8, roughness: 0.3 })
 for (let z = 15; z > FINISH_Z - 15; z -= 13) {
   const seg = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.1, 14), riverMat)
@@ -230,24 +240,44 @@ for (let z = 20; z > FINISH_Z - 20; z -= 45) {
   addCloud((Math.random() - 0.5) * CORRIDOR_HALF_WIDTH * 1.6, CRUISE_Y + 6 + Math.random() * 10, z + Math.random() * 15, 1.5 + Math.random())
 }
 
-// Every collidable obstacle (walls, ceiling risers, floor risers) is now a rock mass built from a row of
-// overlapping mountain cones instead of a flat box - the route through the maze is walled in and roofed by
-// actual mountains, not architecture. addRockMass() fills the same rectangular footprint (xCenter/width,
-// yBase/height) that the invisible AABB collision below still uses, so gameplay is completely unchanged -
-// only what gets rendered there changed. Overlapping cone radii (wider than their spacing) keep there from
-// being gaps you could see daylight through.
+// Every collidable obstacle (walls, floor risers) is a rock mass built from a row of mountain cones instead
+// of a flat box - the route through the maze is walled in by actual mountains, not architecture.
+// addRockMass() fills the same rectangular footprint (xCenter/width, yBase/height) that the invisible AABB
+// collision below still uses, so gameplay is unchanged - only what gets rendered there changed. Cone centers
+// are INSET by one radius from both edges of the footprint (not spread edge-to-edge), so no cone's outer
+// surface ever crosses the footprint boundary into the flyable gap next to it; neighboring cones are still
+// spaced closer than 2x their radius so they overlap each other, leaving no visible gaps between them.
+function addRockCone(x, radius, yBase, height, z) {
+  const h = height * (0.95 + Math.random() * 0.35) // slightly tall/jagged rather than exactly filling the box
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(radius, h, 16), rockMat)
+  cone.position.set(x, yBase + h / 2, z + (Math.random() - 0.5) * GATE_THICKNESS * 0.3)
+  scene.add(cone)
+}
 function addRockMass(xCenter, width, yBase, height, z) {
   if (width <= 0.05 || height <= 0.05) return
-  const n = Math.max(1, Math.round(width / 4.5))
-  const colWidth = width / n
-  for (let i = 0; i < n; i++) {
-    const x = xCenter - width / 2 + colWidth * (i + 0.5) + (Math.random() - 0.5) * colWidth * 0.3
-    const h = height * (0.95 + Math.random() * 0.35) // slightly tall/jagged rather than exactly filling the box
-    const radius = colWidth * 0.75 // > colWidth/2 so neighboring cones overlap, no visible gaps
-    const cone = new THREE.Mesh(new THREE.ConeGeometry(radius, h, 16), rockMat)
-    cone.position.set(x, yBase + h / 2, z + (Math.random() - 0.5) * GATE_THICKNESS * 0.4)
-    scene.add(cone)
-  }
+  const radius = 2.4
+  if (width <= radius * 2) { addRockCone(xCenter, Math.min(radius, width / 2), yBase, height, z); return }
+  const usable = width - radius * 2 // inset by one radius on each side
+  const n = Math.max(2, Math.ceil(usable / (radius * 1.3)) + 1) // spacing < 2*radius guarantees overlap
+  for (let i = 0; i < n; i++) addRockCone(xCenter - width / 2 + radius + usable * i / (n - 1), radius, yBase, height, z)
+}
+// Arch: a solid rounded tunnel (a big cylinder lying on its side, spanning the gap width) instead of jagged
+// rock cones for the ceiling obstacle - its rounded underside reads as "fly under this arch" from below, the
+// same visual cue an actual archway would give. It stays a solid mesh on purpose, not a hollow ring: the
+// entire band from yBase up to CORRIDOR_TOP is real collision volume with no flyable opening in it anywhere,
+// so a genuinely hollow arch shape would visually lie about where the invisible collision boundary is.
+// The cylinder's lowest point sits exactly at yBase (the actual collision boundary) - never below it, so it
+// can't intrude into the flyable space beneath, the same edge-touching-not-crossing rule addRockMass follows.
+function addArch(xCenter, width, yBase, height, z) {
+  if (width <= 0.05 || height <= 0.05) return
+  const radius = Math.max(height, width * 0.6) // generous: radius >= height guarantees the top clears CORRIDOR_TOP with no separate fill piece needed
+  const tunnel = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, width, 20), rockMat)
+  tunnel.rotation.z = Math.PI / 2 // axis along X, spanning exactly the gap width - same footprint the wall cones touch, not cross
+  tunnel.position.set(xCenter, yBase + radius, z)
+  scene.add(tunnel)
+  const legW = 2.6 // short rock legs so it doesn't look like it's floating - outside the gap, same inset rule as the wall cones
+  addRockMass(xCenter - width / 2 - legW / 2, legW, CORRIDOR_BOTTOM, yBase - CORRIDOR_BOTTOM, z)
+  addRockMass(xCenter + width / 2 + legW / 2, legW, CORRIDOR_BOTTOM, yBase - CORRIDOR_BOTTOM, z)
 }
 for (const g of MAZE) {
   const gapY = g.gapY ?? CRUISE_Y, gapHeight = g.gapHeight ?? CORRIDOR_HEIGHT
@@ -260,7 +290,7 @@ for (const g of MAZE) {
   // side, harmless as a thin flat sliver but very visible as chunky cones spanning the whole gap width. Only
   // climb/dive gates clear this threshold; straight gates correctly render nothing on the small side.
   if (floorH > 8) addRockMass(g.gapX, g.gapWidth, CORRIDOR_BOTTOM, floorH, g.z) // rocky hill you climb over (climb gates)
-  if (ceilingH > 8) addRockMass(g.gapX, g.gapWidth, gapY + gapHeight / 2, ceilingH, g.z) // mountain ridge you duck under (dive gates)
+  if (ceilingH > 8) addArch(g.gapX, g.gapWidth, gapY + gapHeight / 2, ceilingH, g.z) // rock arch you duck under (dive gates)
 }
 
 // ---- Creature: a horse body with bird wings, built from primitive geometry (boxes/cones/cylinders), same
