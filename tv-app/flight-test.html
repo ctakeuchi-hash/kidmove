@@ -151,9 +151,33 @@ ws.onmessage = (e) => {
   if (m.type === 'kp') { const b = (m.ps?.[0] || m).b; if (b) onPose(b) }
 }
 
+// ---- Procedural canvas textures: no image assets in this repo (everything is hand-built), so grass/rock/
+// water detail and the sky gradient are drawn to small offscreen canvases at load time instead of loading
+// files - zero new dependencies, matches the "no bundler" philosophy the rest of tv-app already follows. ----
+function canvasTexture(w, h, draw) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h
+  draw(c.getContext('2d'), w, h)
+  return new THREE.CanvasTexture(c)
+}
+function tiledTexture(size, repeatX, repeatY, draw) {
+  const tex = canvasTexture(size, size, draw)
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(repeatX, repeatY)
+  return tex
+}
+const skyTex = canvasTexture(2, 256, (ctx, w, h) => { // tall vertical strip, canvas Y 0=top=zenith
+  const g = ctx.createLinearGradient(0, 0, 0, h)
+  g.addColorStop(0, '#0b0b2a')   // zenith - deep night-indigo
+  g.addColorStop(0.55, '#2a2a55') // mid sky
+  g.addColorStop(0.8, '#7a5a7a')  // dusk haze
+  g.addColorStop(1, '#e2895a')    // horizon - warm sunset orange
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h)
+})
+
 const scene = new THREE.Scene()
-scene.background = new THREE.Color(0x0b0b1a)
-scene.fog = new THREE.Fog(0x0b0b1a, 60, 180)
+scene.background = skyTex
+const FOG_COLOR = 0x5a4a6a // matches the sky gradient's dusk-haze band, so distant terrain fades into the sky instead of a mismatched flat color
+scene.fog = new THREE.Fog(FOG_COLOR, 60, 180)
 
 const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500)
 camera.position.copy(CHASE_OFFSET) // third-person chase view: behind and slightly above the creature
@@ -167,20 +191,46 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight)
 })
 
-scene.add(new THREE.AmbientLight(0xffffff, 0.7))
-const sun = new THREE.DirectionalLight(0xffffff, 1.1)
+// Dusk lighting to match the sky gradient: a warm "setting sun" key light, a cool blue ambient fill (the sky's
+// own bounce light), and a dim cool rim light from behind for a bit of edge separation - no shadow maps (real
+// per-object shadow casting is expensive and frame rate on the target TV hardware is already an open question).
+scene.add(new THREE.AmbientLight(0x8fa0cc, 0.55))
+const sun = new THREE.DirectionalLight(0xffb173, 1.3)
 sun.position.set(15, 25, 10)
 scene.add(sun)
+const rim = new THREE.DirectionalLight(0x445577, 0.35)
+rim.position.set(-10, 10, -15)
+scene.add(rim)
 
 // ---- Landscape: a grass floor with a winding river, mountain ranges along both sides, and scattered trees,
 // plus one "gate" per MAZE entry - the same collidable risers as before (left/right walls become mountain
 // slopes, floor risers become rocky hills, ceiling risers become stone overpasses/bridges you duck under).
-// All still simple flat-color primitive geometry, just dressed up - the collision math is untouched. ----
+// All still simple primitive geometry, just dressed up with procedural textures and gentle terrain - the
+// collision math (an invisible AABB, unrelated to what's rendered) is completely untouched throughout. ----
+
+// A small hand-rolled 2D value-noise (hash + smoothstep interpolation) - not true Perlin/Simplex, but plenty
+// smooth for gently rolling ground, and it's 4 lines instead of a new dependency.
+function hash2(x, y) { const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return s - Math.floor(s) }
+function noise2(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi
+  const s = xf * xf * (3 - 2 * xf), t = yf * yf * (3 - 2 * yf)
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1)
+  return a + (b - a) * s + (c - a) * t + (a - b - c + d) * s * t
+}
+
+const grassTex = tiledTexture(64, 20, 40, (ctx, s) => {
+  ctx.fillStyle = '#3a4a26'; ctx.fillRect(0, 0, s, s)
+  for (let i = 0; i < 400; i++) { ctx.fillStyle = Math.random() < 0.5 ? '#33421f' : '#46592e'; ctx.fillRect(Math.random() * s, Math.random() * s, 2, 2) }
+})
 const floorLen = -FINISH_Z + 40
-const floor = new THREE.Mesh(
-  new THREE.PlaneGeometry(CORRIDOR_HALF_WIDTH * 2, floorLen),
-  new THREE.MeshStandardMaterial({ color: 0x3a4a26 }), // grass
-)
+const floorGeo = new THREE.PlaneGeometry(CORRIDOR_HALF_WIDTH * 2 + 60, floorLen, 32, 64)
+const floorPos = floorGeo.attributes.position
+for (let i = 0; i < floorPos.count; i++) { // gentle rolling hills - two noise octaves, amplitude kept modest (~2.4 units) since this is purely cosmetic ground detail, well clear of any collision boundary
+  const x = floorPos.getX(i), y = floorPos.getY(i)
+  floorPos.setZ(i, noise2(x * 0.05, y * 0.05) * 1.8 + noise2(x * 0.15, y * 0.15) * 0.6)
+}
+floorGeo.computeVertexNormals()
+const floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ map: grassTex, roughness: 0.9 }))
 floor.rotation.x = -Math.PI / 2
 floor.position.set(0, CORRIDOR_BOTTOM, FINISH_Z / 2)
 scene.add(floor)
@@ -197,10 +247,17 @@ function gapXAt(z) {
   return 0
 }
 const riverX = gapXAt
-const riverMat = new THREE.MeshStandardMaterial({ color: 0x2f7fb8, roughness: 0.3 })
+const waterTex = tiledTexture(64, 1, 90, (ctx, s) => {
+  ctx.fillStyle = '#1c6fb0'; ctx.fillRect(0, 0, s, s)
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)'
+  for (let i = 0; i < 40; i++) { const y = Math.random() * s; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(s, y + Math.random() * 6 - 3); ctx.stroke() }
+})
+// emissive keeps the water reading as blue regardless of the warm dusk lighting - without it, the sunset key
+// light washed the river out to a flat stone-gray, same as everything else it touches.
+const riverMat = new THREE.MeshStandardMaterial({ map: waterTex, roughness: 0.25, emissive: 0x0c3a63, emissiveIntensity: 0.6 })
 for (let z = 15; z > FINISH_Z - 15; z -= 13) {
   const seg = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.1, 14), riverMat)
-  seg.position.set(riverX(z), CORRIDOR_BOTTOM + 0.06, z)
+  seg.position.set(riverX(z), CORRIDOR_BOTTOM + 2.8, z) // ground noise amplitude tops out at 1.8+0.6=2.4 (see floorPos loop above) - stay clear of that or the river gets buried under a bump
   scene.add(seg)
 }
 
@@ -225,7 +282,11 @@ for (let z = 10; z > FINISH_Z - 10; z -= 16) { // ponytail: sparse on purpose - 
 // Mountains: a continuous jagged skyline of smooth (high-segment, not low-poly-faceted) cone peaks along both
 // sides, well above the flyable corridor (CORRIDOR_TOP) so they're pure backdrop, never collidable. Taller
 // peaks get a small white snow cap. rockMat is reused below by addRockMass() for the collidable obstacles.
-const rockMat = new THREE.MeshStandardMaterial({ color: 0x6e6459, roughness: 0.95 })
+const rockTex = tiledTexture(64, 3, 3, (ctx, s) => {
+  ctx.fillStyle = '#6e6459'; ctx.fillRect(0, 0, s, s)
+  for (let i = 0; i < 500; i++) { const v = 60 + Math.random() * 60; ctx.fillStyle = `rgb(${v + 40},${v + 30},${v + 20})`; ctx.fillRect(Math.random() * s, Math.random() * s, 3, 3) }
+})
+const rockMat = new THREE.MeshStandardMaterial({ map: rockTex, roughness: 0.95 })
 const snowMat = new THREE.MeshStandardMaterial({ color: 0xf0f2f5, roughness: 0.8 })
 function addPeak(x, z, h, radius = h * 0.55) {
   const peak = new THREE.Mesh(new THREE.ConeGeometry(radius, h, 16), rockMat)
@@ -312,8 +373,9 @@ for (const g of MAZE) {
 }
 
 // Boulders: low-poly rocks (icosahedra - angular and irregular, not smooth like the mountains, so they read
-// as distinct dodge targets) at each OBSTACLES entry, random rotation for visual variety only.
-const boulderMat = new THREE.MeshStandardMaterial({ color: 0x8a8577, roughness: 0.95 })
+// as distinct dodge targets) at each OBSTACLES entry, random rotation for visual variety only. Shares rockTex
+// with the mountains for the same speckled detail, tinted lighter so they still read as a separate object.
+const boulderMat = new THREE.MeshStandardMaterial({ map: rockTex, color: 0xb0aa9c, roughness: 0.95 })
 for (const o of OBSTACLES) {
   const rock = new THREE.Mesh(new THREE.IcosahedronGeometry(o.radius, 0), boulderMat)
   rock.position.set(o.x, o.y, o.z)
@@ -559,6 +621,7 @@ function tick(now) {
   updateWings(now)
   updateConfetti(dt)
   updateDebugOverlay()
+  waterTex.offset.y -= dt * 0.4 // scrolling texture offset - a flowing-water look for the price of one number per frame
   scoreEl.textContent = `Score: ${score}`
   camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
   camera.lookAt(creature.position.x, creature.position.y + 0.5, creature.position.z)
