@@ -1,0 +1,161 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flight Test — Kids Motion Game</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0b1a;overflow:hidden}
+  canvas{display:block}
+  #hint{position:fixed;top:8px;left:12px;margin:0;color:#9ad;font:14px system-ui;opacity:.85}
+</style>
+<pre id="hint">Stage B: arrows/WASD to bank &amp; pitch, Space to flap</pre>
+
+<!-- No bundler in this repo (see tv-app/index.html) - Three.js is loaded straight from a CDN via a native
+     browser import map, same "no build step" philosophy as the rest of tv-app. -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+
+// ponytail: placeholder rigged bird (one of three.js's own long-standing bundled demo assets) stands in for
+// the alicorn until Stage F swaps in a real rigged unicorn/pegasus - proves the load+animate+render pipeline
+// first, exactly as Stage A calls for. Swap CREATURE_URL for the real asset later; no other code should need
+// to change (GLTFLoader + AnimationMixer usage is asset-agnostic).
+const CREATURE_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r169/examples/models/gltf/Parrot.glb'
+const CANYON_GAP = 16      // horizontal gap between the two canyon walls
+const CANYON_LENGTH = 200  // how far one corridor segment extends
+const CHASE_OFFSET = new THREE.Vector3(0, 3, 9) // camera position relative to the creature
+
+// ---- Stage B tuning: all easily retunable from here, matching tv-app/index.html's CONFIG convention.
+// Bank/pitch self-level back to 0 when released - forgiving for young kids, same easy-difficulty philosophy
+// as the rest of the app. Flap is a glide-then-sink model: holding it gains altitude+speed, releasing bleeds
+// both off gradually (never a hard stop). ----
+const MAX_BANK = 0.6, BANK_RATE = 2.2, BANK_LEVEL_RATE = 1.6, TURN_SPEED = 8   // rad, rad/s, rad/s, units/s per rad
+const MAX_PITCH = 0.5, PITCH_RATE = 2.2, PITCH_LEVEL_RATE = 1.6, PITCH_CLIMB_RATE = 6
+const FLAP_LIFT = 14, GRAVITY = 9, FLAP_ACCEL = 4, DRAG = 2, MIN_SPEED = 3, MAX_SPEED = 12, MAX_VY = 8
+const CREATURE_RADIUS = 1.5, Y_MIN = -4, Y_MAX = 14
+const WALL_BOUNCE_DAMPING = 0.85 // speed multiplier on hitting a wall - a brief slow-down, never a hard stop
+
+// ---- Input: arrow keys or WASD for bank/pitch, Space to flap. preventDefault so the page doesn't scroll. ----
+const keys = {}
+const KEY_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'a', 'A', 'd', 'D', 'w', 'W', 's', 'S', ' ']
+addEventListener('keydown', (e) => { if (KEY_KEYS.includes(e.key)) { keys[e.key] = true; e.preventDefault() } })
+addEventListener('keyup', (e) => { keys[e.key] = false })
+const held = (...ks) => ks.some((k) => keys[k])
+
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(0x0b0b1a)
+scene.fog = new THREE.Fog(0x0b0b1a, 60, 180)
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500)
+camera.position.copy(CHASE_OFFSET) // third-person chase view: behind and slightly above the creature
+
+const renderer = new THREE.WebGLRenderer({ antialias: true })
+renderer.setSize(innerWidth, innerHeight)
+renderer.setPixelRatio(Math.min(2, devicePixelRatio))
+document.body.appendChild(renderer.domElement)
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix()
+  renderer.setSize(innerWidth, innerHeight)
+})
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.7))
+const sun = new THREE.DirectionalLight(0xffffff, 1.1)
+sun.position.set(15, 25, 10)
+scene.add(sun)
+
+// ---- Canyon: two long walls with a gap between them, running away from the camera. Simple flat colors
+// ("textured simply" per the brief) - real texturing/segments come in Stage C's maze rework. ----
+const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a6a4f, roughness: 0.95 })
+const wallGeo = new THREE.BoxGeometry(20, 60, CANYON_LENGTH)
+for (const side of [-1, 1]) {
+  const wall = new THREE.Mesh(wallGeo, wallMat)
+  wall.position.set(side * (CANYON_GAP / 2 + 10), 10, -CANYON_LENGTH / 2)
+  scene.add(wall)
+}
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(CANYON_GAP + 40, CANYON_LENGTH),
+  new THREE.MeshStandardMaterial({ color: 0x2c2f22 }),
+)
+floor.rotation.x = -Math.PI / 2
+floor.position.set(0, -6, -CANYON_LENGTH / 2)
+scene.add(floor)
+
+// ---- Creature: loads async, plays its first animation clip on loop ----
+let mixer, creature
+new GLTFLoader().load(CREATURE_URL, (gltf) => {
+  creature = gltf.scene
+  creature.scale.setScalar(0.04) // Parrot.glb is modeled much larger than our scene units
+  creature.position.set(0, 1, 0)
+  creature.rotation.y = Math.PI // face away from the camera, down the canyon (its direction of travel)
+  scene.add(creature)
+  if (gltf.animations.length) {
+    mixer = new THREE.AnimationMixer(creature)
+    mixer.clipAction(gltf.animations[0]).play()
+  } else {
+    document.getElementById('hint').textContent += ' (model has no animation clips)'
+  }
+}, undefined, (err) => {
+  document.getElementById('hint').textContent = 'Failed to load creature model: ' + err.message
+})
+
+// ---- Flight physics state ----
+let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED
+
+function stepPhysics(dt) {
+  // Bank: ramp toward the held direction's max, self-level toward 0 otherwise; steer x by the bank angle.
+  const bankTarget = held('ArrowLeft', 'a', 'A') ? -MAX_BANK : held('ArrowRight', 'd', 'D') ? MAX_BANK : 0
+  const bankRate = bankTarget === 0 ? BANK_LEVEL_RATE : BANK_RATE
+  bank += Math.sign(bankTarget - bank) * Math.min(Math.abs(bankTarget - bank), bankRate * dt)
+  creature.rotation.z = -bank
+  creature.position.x += Math.sin(bank) * TURN_SPEED * dt
+
+  // Pitch: same shape, feeding a direct climb/dive rate.
+  const pitchTarget = held('ArrowUp', 'w', 'W') ? MAX_PITCH : held('ArrowDown', 's', 'S') ? -MAX_PITCH : 0
+  const pitchRate = pitchTarget === 0 ? PITCH_LEVEL_RATE : PITCH_RATE
+  pitch += Math.sign(pitchTarget - pitch) * Math.min(Math.abs(pitchTarget - pitch), pitchRate * dt)
+  creature.rotation.x = pitch
+  creature.position.y += Math.sin(pitch) * PITCH_CLIMB_RATE * dt
+
+  // Flap: holding gains altitude + forward speed; releasing lets both bleed off gradually (glide-then-sink).
+  if (held(' ')) { vy += FLAP_LIFT * dt; speed = Math.min(MAX_SPEED, speed + FLAP_ACCEL * dt) }
+  else { vy -= GRAVITY * dt; speed = Math.max(MIN_SPEED, speed - DRAG * dt) }
+  vy = Math.max(-MAX_VY, Math.min(MAX_VY, vy))
+  creature.position.y += vy * dt
+  if (creature.position.y < Y_MIN) { creature.position.y = Y_MIN; vy = Math.max(0, vy) }
+  else if (creature.position.y > Y_MAX) { creature.position.y = Y_MAX; vy = Math.min(0, vy) }
+
+  // Forward motion + endless corridor loop.
+  creature.position.z -= speed * dt
+  if (creature.position.z < -CANYON_LENGTH) creature.position.z = 0
+
+  // Wall collision: gentle bounce-back + brief slow-down, never a hard stop (matches Jump Dodge's low-stakes misses).
+  // Damping is floored at MIN_SPEED so leaning into a wall settles into a brief slow-down, never drains
+  // toward zero/negative if the player keeps holding the bank key against it.
+  const halfGap = CANYON_GAP / 2 - CREATURE_RADIUS
+  if (creature.position.x > halfGap) { creature.position.x = halfGap; bank = -Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+  else if (creature.position.x < -halfGap) { creature.position.x = -halfGap; bank = Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+}
+
+window.DEBUG = { scene, camera, get creature() { return creature }, get physics() { return { bank, pitch, speed, vy } } }
+
+let last = performance.now()
+function tick(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now
+  mixer?.update(dt)
+  if (creature) {
+    stepPhysics(dt)
+    camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
+    camera.lookAt(creature.position.x, creature.position.y + 0.5, creature.position.z)
+  }
+  renderer.render(scene, camera)
+  requestAnimationFrame(tick)
+}
+requestAnimationFrame(tick)
+</script>
