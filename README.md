@@ -3,7 +3,7 @@
 Your phone's camera tracks your body → the server relays it → a TV-connected browser shows the games. Your body appears on the TV as a cartoon bear.
 
 **Games**
-- **Trace** (arm-writing): capital letters (ABC), small letters (abc), numbers (123), Japanese **hiragana** (あ) and **katakana** (ア). Follow the numbered start dot and arrows, stroke by stroke, in the right order and direction.
+- **Trace** (arm-writing): capital letters (ABC), small letters (abc), numbers (123), Japanese **hiragana** (あ) and **katakana** (ア). Follow the numbered start dot and arrows, stroke by stroke, in the right order and direction. Practice a subset (vowels/consonants, or a kana row) and shuffle the order; each character shows a picture+word clue while you trace it.
 - **Jump Dodge**: jump over spikes.
 - **1 or 2 players**: in Trace, two people (one on each side of the room) trace the same character together; it counts as done when both finish.
 
@@ -31,11 +31,11 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 
 **Menu (on the TV):** big buttons for each character set, Jump Dodge, and 1 / 2 Players. Press one by **clicking it**, by **holding your hand on it for a second** (a bar fills), from the **phone buttons**, or by **voice**. Top right: 🏠 Menu, ⏭ Skip, 🔊 sound.
 
-**Trace:** a faint character appears made of numbered strokes. Start at the pulsing yellow **1**, follow the moving arrows. Paint only appears where you have traced the correct stroke, in order, in the right direction; scribbling or going the wrong way does nothing. Finish a stroke to move to the next; finish all to celebrate and move to the next character. Kana show how to say them in the bottom-left, and the TV says the character out loud.
+**Trace:** picking a set from the menu opens a screen to choose what to practice — **All**, **Vowels**/**Consonants** (letters), or a kana **row** (あ-row, か-row, ...) — plus a **🔀 Shuffle** toggle to mix up the order. Then: a faint character appears made of numbered strokes. Start at the pulsing yellow **1**, follow the moving arrows. Paint only appears where you have traced the correct stroke, in order, in the right direction; scribbling or going the wrong way does nothing. A "🎯 N to go" counter tracks progress, and most characters show a picture+word clue (e.g. A → 🍎 Apple) while you trace. Finish a stroke to move to the next; finish all to hear it called out (e.g. "A! A is for Apple!"), celebrate, and move to the next character. Kana show how to say them in the bottom-left, and the TV says the character out loud both when it appears and when you finish it.
 
 **Two players:** choose "2 Players" (menu, phone button, `P` key, or say "two players"). Stand left and right of each other in view. Each side has its own copy; when both are done it celebrates together. (If only one person is in view, they play on whichever side they stand.)
 
-**Voice** (needs `ANTHROPIC_API_KEY`; the phone listens continuously): "play hiragana", "small letters", "numbers", "jump game", "two players", "go to the menu", "next letter", "restart", "make it easier", "make it dogs in a jungle".
+**Voice** (needs `ANTHROPIC_API_KEY`; the phone listens continuously): "play hiragana", "small letters", "numbers", "jump game", "two players", "go to the menu", "next letter", "restart", "make it easier", "make it dogs in a jungle", "just vowels", "consonants only", "the ka row", "shuffle the letters", "put them back in order".
 
 **Session:** after ~15 minutes of active play a break screen appears. A grown-up presses **Enter** (or taps the bottom of the screen) to start again.
 
@@ -52,6 +52,8 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 | Session length | `?sessionMin=10` |
 | Hold-to-press time | `?dwellMs=1500` |
 | Start straight in a game | `?set=hiragana&players=2`, `?game=jump` |
+| Practice a subset | groups screen (after picking a set), voice, or `?group=vowels` / `?group=consonants` / `?group=row0`.."row9" |
+| Randomize character order | groups screen's 🔀 Shuffle tile, voice ("shuffle the letters"), or `?shuffle=1` |
 | Mute | `M` |
 | Test without a phone | `?mouse=1` (mouse = wrist), `Space` = fake jump |
 
@@ -69,4 +71,7 @@ Generated images are cached in `server/cache/`.
 - **Old behaviour after an update:** restart the server and refresh both pages; the version at the bottom should match.
 
 ## Credits
-Kana stroke order and shapes come from [KanjiVG](http://kanjivg.tagaini.net) © Ulrich Apel and contributors, licensed [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). The derived data in `tv-app/kana.js` is shared under the same license. Latin letter and digit strokes in `tv-app/strokes.js` are hand-made single-line skeletons.
+Kana stroke order and shapes come from [KanjiVG](http://kanjivg.tagaini.net) © Ulrich Apel and contributors, licensed [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). The derived data in `tv-app/kana.js` is shared under the same license. Latin letter and digit strokes in `tv-app/strokes.js` are hand-made single-line skeletons. The picture/word clues in `tv-app/clues.js` and the practice groupings in `tv-app/groups.js` are original, hand-authored content (not derived from KanjiVG).
+
+## Checks
+`npm test` (or `node tv-app/check.js`) validates the character/group/clue data (no test framework — a plain assert-based script).

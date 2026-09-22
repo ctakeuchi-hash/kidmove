@@ -4,6 +4,7 @@
   "private": true,
   "workspaces": ["server", "phone-app", "tv-app"],
   "scripts": {
-    "dev": "npm run dev -w server"
+    "dev": "npm run dev -w server",
+    "test": "node tv-app/check.js"
   }
 }

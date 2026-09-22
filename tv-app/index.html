@@ -11,6 +11,8 @@
 </style>
 <script src="kana.js"></script>
 <script src="strokes.js"></script>
+<script src="groups.js"></script>
+<script src="clues.js"></script>
 <canvas id="c"></canvas>
 <div id="bar"><button id="btnSkip">⏭ Skip</button><button id="btnMenu">🏠 Menu</button><button id="snd"></button></div>
 <div id="ver" style="position:fixed;left:12px;bottom:8px;color:#889;font:14px monospace"></div>
@@ -36,8 +38,10 @@ const CONFIG = {
   players: 1,          // 1 or 2 (two players trace the same character together)
   dwellMs: 1000,       // hold your hand on a menu button this long to press it
   mouse: 0,            // 1 = use the mouse as the wrist (test without a phone)
+  group: '',           // practice a subset of the current set, e.g. 'vowels', 'consonants', 'row0'.. ('' = all)
+  shuffle: 0,          // 1 = randomize character order instead of the fixed set order
 }
-for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = ['letters', 'game', 'mapping', 'set'].includes(k) ? v : +v
+for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = ['letters', 'game', 'mapping', 'set', 'group'].includes(k) ? v : +v
 
 fetch('/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => document.getElementById('ver').textContent = 'v' + v.version).catch(() => {})
 const cv = document.getElementById('c'), ctx = cv.getContext('2d'), hud = document.getElementById('hud')
@@ -45,11 +49,25 @@ let W, H
 const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; if (scene === 'play' && mode === 'trace') loadChar(idx) }
 
 // ---- App state ----
-let scene = 'menu'                 // 'menu' | 'play'
+let scene = 'menu'                 // 'menu' | 'groups' | 'play'
 let mode = 'trace', set = 'upper'   // what is being played: 'trace' (character set = set) or 'jump'
 let nPlayers = CONFIG.players === 2 ? 2 : 1
 let winTimer, idx = 0, won = false, hue = 0
-const chars = () => CONFIG.letters ? [...CONFIG.letters] : SETS[set].chars
+let pendingSet = null              // set awaiting a group choice on the 'groups' screen
+let shuffle = !!CONFIG.shuffle     // live randomize-order toggle (CONFIG.shuffle is just its URL-provided start value)
+
+// ---- Character order: group-filtered, optionally shuffled. Recomputed only when set/group/shuffle change
+// (via setOrder()), never per-frame - idx indexes into this and must stay stable mid-trace. ----
+let order = null
+function baseChars() { return CONFIG.letters ? [...CONFIG.letters] : SETS[set].chars }
+function groupChars() {
+  if (CONFIG.letters) return baseChars()
+  const gs = GROUPS[set] || [{ id: 'all', chars: baseChars() }]
+  return (gs.find((g) => g.id === CONFIG.group) || gs[0]).chars // unknown/empty group id falls back to 'all'
+}
+function shuffleArr(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[a[i], a[j]] = [a[j], a[i]] } return a }
+function setOrder() { order = shuffle ? shuffleArr(groupChars()) : groupChars() }
+const chars = () => order || (order = groupChars())
 const wantPoses = () => (scene === 'play' && mode === 'jump') ? 1 : nPlayers // how many people the phone should track
 
 // ---- Players (trace game + menu pointers). Each has their own hand history, trail and copy of the character ----
@@ -64,7 +82,7 @@ function layout(i) {
   if (nPlayers === 1) return { cx: W / 2, size: Math.min(H * 0.8, W * 0.6 / bw) }
   return { cx: W * (i ? 0.75 : 0.25), size: Math.min(H * 0.7, W * 0.4 / bw) }
 }
-const anchorX = (i) => scene === 'menu' ? (nPlayers === 1 ? W / 2 : W * (i ? 0.58 : 0.42)) : layout(i).cx
+const anchorX = (i) => scene === 'menu' || scene === 'groups' ? (nPlayers === 1 ? W / 2 : W * (i ? 0.58 : 0.42)) : layout(i).cx
 
 // ---- Trace game: each character is a list of strokes (strokes.js / kana.js). Trace them IN ORDER, each in its own direction:
 // start near the numbered dot, follow the arrows. Paint only appears along the line you have actually traced.
@@ -217,7 +235,14 @@ function win() {
   active().forEach((pl) => pl.strokes.forEach((st) => st.d = st.len))
   celebrate(nPlayers === 2 ? 260 : 180)
   if (nPlayers === 2) pop('You did it together!', W / 2, H * 0.5)
-  speak(chars()[idx])
+  const ch = chars()[idx], clue = typeof CLUES !== 'undefined' && CLUES[ch]
+  let phrase = ch
+  if (clue) {
+    if (SETS[set].lang === 'ja-JP') phrase = `${ch}、${clue.word}`
+    else if (set === 'digits') { const n = Number(ch); phrase = n === 0 ? `${clue.word}!` : `${clue.word}! ${clue.word} ${n === 1 ? 'apple' : 'apples'}!` }
+    else phrase = `${ch}! ${ch} is for ${clue.word}!`
+  }
+  speak(phrase)
   winTimer = setTimeout(() => loadChar(idx + 1), CONFIG.pauseMs)
 }
 // Say the character out loud (browser text-to-speech; silent if unavailable or muted)
@@ -329,21 +354,30 @@ const sendConfig = () => { if (ws.readyState === 1) ws.send(JSON.stringify({ typ
 function startGame(kind, s) {
   clearTimeout(winTimer); confetti.length = 0; fx.length = 0; scene = 'play'; mode = kind
   if (kind === 'jump') { nPlayers = 1; jumpReset() }
-  else { set = s; loadChar(0) }
+  else { set = s; order = null; setOrder(); loadChar(0) }
   notice = { text: kind === 'jump' ? 'Jump Dodge! Jump over the spikes' : `${SETS[set].name}${nPlayers === 2 ? ' - 2 players' : ''}`, until: performance.now() + 2500 }
   sendConfig(); syncBar()
 }
-function showMenu() { clearTimeout(winTimer); confetti.length = 0; scene = 'menu'; dwell = null; sendConfig(); syncBar() }
+function showMenu() { clearTimeout(winTimer); confetti.length = 0; scene = 'menu'; pendingSet = null; dwell = null; sendConfig(); syncBar() }
 function setPlayers(n) {
   nPlayers = n === 2 ? 2 : 1
   if (scene === 'play' && mode === 'jump') startGame('trace', set) // Jump Dodge is 1 player: 2 players means back to tracing
   else if (scene === 'play') loadChar(idx)
   sendConfig()
 }
+function pickGroup(setId) { // called from the groups screen, and directly (voice/keyboard) to bypass it
+  clearTimeout(winTimer); confetti.length = 0; scene = 'groups'; pendingSet = setId; dwell = null; syncBar()
+}
+function chooseGroup(groupId) { CONFIG.group = groupId; order = null; startGame('trace', pendingSet); pendingSet = null }
+function resolveGroup(setId, name) { // name = group id or label, case-insensitive; falls back to 'all' if no match
+  const gs = GROUPS[setId] || []
+  const g = gs.find((x) => x.id === name || x.label.toLowerCase() === String(name).toLowerCase())
+  return g ? g.id : 'all'
+}
 function runCommand(name, input = {}) {
   if (name === 'switch_game') {
     const g = input.name === 'letters' ? 'upper' : input.name
-    if (g === 'jump') startGame('jump'); else if (SETS[g]) startGame('trace', g)
+    if (g === 'jump') startGame('jump'); else if (SETS[g]) { CONFIG.group = 'all'; startGame('trace', g) }
   }
   else if (name === 'set_players') setPlayers(input.players)
   else if (name === 'show_menu') showMenu()
@@ -352,6 +386,8 @@ function runCommand(name, input = {}) {
   else if (name === 'set_difficulty' && LEVELS[input.level]) {
     [CONFIG.threshold, CONFIG.brush] = LEVELS[input.level]; [CONFIG.jumpThreshold, CONFIG.jumpSpeed] = JUMP_LEVELS[input.level]
   }
+  else if (name === 'set_group' && scene === 'play' && mode === 'trace') { CONFIG.group = resolveGroup(set, input.group); order = null; setOrder(); loadChar(0) }
+  else if (name === 'set_shuffle') { shuffle = !!input.on; order = null; if (scene === 'play' && mode === 'trace') { setOrder(); loadChar(0) } }
   else console.warn('unknown command', name, input)
 }
 const syncBar = () => {
@@ -378,11 +414,54 @@ const inRect = (r, x, y) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y +
 function pressMenu(r) {
   sfx.ping(2); cheer(700)
   if (r.n) { setPlayers(r.n); return }
-  startGame(r.id === 'jump' ? 'jump' : 'trace', r.id)
+  if (r.id === 'jump') { startGame('jump'); return }
+  pickGroup(r.id) // trace sets go through the groups screen first (its 'All' tile plays everything, same as before)
 }
 function menuPointers(now) { // hands (fresh poses) and the mouse
   const p = active().filter((pl) => pl.ptr && now - pl.ptr.t < 500).map((pl) => pl.ptr)
   return mouseXY ? [...p, mouseXY] : p
+}
+
+// ---- Groups screen: pick a subset of the chosen set (or 'All'), plus a shuffle toggle. Same dwell/click
+// mechanics as the main menu (menuPointers/inRect), just a different tile source. ----
+function groupRects() {
+  const gs = GROUPS[pendingSet] || [{ id: 'all', label: 'All' }]
+  const cols = Math.min(5, gs.length), gx = W * 0.02, gy = H * 0.035, chh = H * 0.16
+  const cw = (W * 0.92 - (cols - 1) * gx) / cols // fit exactly within the viewport regardless of column count
+  const x0 = (W - (cols * cw + (cols - 1) * gx)) / 2, y0 = H * 0.32
+  return [
+    { id: 'back', back: true, x: W * 0.03, y: H * 0.03, w: W * 0.14, h: H * 0.07 },
+    { id: 'shuffle', shuf: true, x: W - W * 0.03 - W * 0.22, y: H * 0.03, w: W * 0.22, h: H * 0.07 },
+    ...gs.map((g, i) => ({ id: g.id, label: g.label, x: x0 + (i % cols) * (cw + gx), y: y0 + Math.floor(i / cols) * (chh + gy), w: cw, h: chh })),
+  ]
+}
+function pressGroup(r) {
+  sfx.ping(2); cheer(700)
+  if (r.back) { showMenu(); return }
+  if (r.shuf) { shuffle = !shuffle; return }
+  chooseGroup(r.id)
+}
+function drawGroups(now, dt) {
+  const rects = groupRects(), ptrs = menuPointers(now)
+  ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = '800 40px system-ui'
+  ctx.fillText(`${SETS[pendingSet].name} — pick what to practice`, W / 2, H * 0.185)
+  let hover = null
+  for (const r of rects) if (ptrs.some((q) => inRect(r, q.x, q.y))) hover = r
+  if (hover && dwell && dwell.id === hover.id) { dwell.ms += dt * 1000; if (dwell.ms >= CONFIG.dwellMs) { const r = hover; dwell = null; pressGroup(r); return } }
+  else dwell = hover ? { id: hover.id, ms: 0 } : null
+  for (const r of rects) {
+    const on = hover === r, sel = !r.back && !r.shuf && r.id === CONFIG.group
+    ctx.save(); if (on) { ctx.translate(r.x + r.w / 2, r.y + r.h / 2); ctx.scale(1.05, 1.05); ctx.translate(-r.x - r.w / 2, -r.y - r.h / 2) }
+    ctx.fillStyle = on ? 'hsl(210 70% 42%)' : 'hsl(210 45% 26%)'; ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 22); ctx.fill()
+    ctx.lineWidth = sel ? 6 : 3; ctx.strokeStyle = sel ? '#ffd23f' : 'rgba(255,255,255,.3)'; ctx.stroke()
+    ctx.fillStyle = '#fff'; ctx.font = `700 ${r.h * 0.34}px system-ui`; ctx.textBaseline = 'middle'
+    ctx.fillText(r.back ? '⬅ Back' : r.shuf ? `🔀 Shuffle: ${shuffle ? 'On' : 'Off'}` : r.label, r.x + r.w / 2, r.y + r.h / 2 + 2)
+    if (on && dwell) { ctx.fillStyle = '#ffd23f'; ctx.fillRect(r.x + 16, r.y + r.h - 12, (r.w - 32) * Math.min(1, dwell.ms / CONFIG.dwellMs), 8) }
+    ctx.textBaseline = 'alphabetic'; ctx.restore()
+  }
+  ctx.font = '500 26px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.7)'
+  ctx.fillText('Hold your hand on a button to choose it', W / 2, H - 40)
+  for (const q of ptrs) { ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.shadowColor = '#fff'; ctx.shadowBlur = 20; ctx.beginPath(); ctx.arc(q.x, q.y, 16, 0, 7); ctx.fill(); ctx.shadowBlur = 0 }
 }
 function drawMenu(now, dt) {
   const rects = menuRects(), ptrs = menuPointers(now)
@@ -411,7 +490,11 @@ function drawMenu(now, dt) {
   for (const q of ptrs) { ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.shadowColor = '#fff'; ctx.shadowBlur = 20; ctx.beginPath(); ctx.arc(q.x, q.y, 16, 0, 7); ctx.fill(); ctx.shadowBlur = 0 }
 }
 addEventListener('mousemove', (e) => { mouseXY = { x: e.clientX, y: e.clientY, t: performance.now() + 1e9 } })
-addEventListener('pointerdown', (e) => { if (scene === 'menu' && !sessionOver) { const r = menuRects().find((q) => inRect(q, e.clientX, e.clientY)); if (r) pressMenu(r) } })
+addEventListener('pointerdown', (e) => {
+  if (sessionOver) return
+  if (scene === 'menu') { const r = menuRects().find((q) => inRect(q, e.clientX, e.clientY)); if (r) pressMenu(r) }
+  else if (scene === 'groups') { const r = groupRects().find((q) => inRect(q, e.clientX, e.clientY)); if (r) pressGroup(r) }
+})
 
 // ---- Body avatar (a cartoon bear). b = [nose, L/R shoulder, L/R elbow, L/R wrist, L/R hip, L/R knee, L/R ankle], normalised camera coords ----
 // 'body' mapping: your shoulders are pinned to a fixed spot on scene and everything is measured from them in torso lengths,
@@ -493,7 +576,7 @@ function onPose(m) {
       if (i === 0 && now > closeUntil + 1500) { sfx.boop(); pop('Whoa!', W - 150, H - 200) }
       closeUntil = now + 300
     }
-    if (scene === 'menu') pl.ptr = { x: wristPx[hi][0], y: wristPx[hi][1], t: now }
+    if (scene === 'menu' || scene === 'groups') pl.ptr = { x: wristPx[hi][0], y: wristPx[hi][1], t: now }
     else if (mode === 'trace') onWrists(pl, wristPx)
     else if (i === 0) onHips(p.k)
   }
@@ -565,7 +648,7 @@ addEventListener('keydown', (e) => {
   else if (e.key === 'm' || e.key === 'M') { muted = !muted; syncBar() }
   else if (e.key === 'p' || e.key === 'P') setPlayers(nPlayers === 1 ? 2 : 1)
   else if (e.key === '[' || e.key === ']') CONFIG.reach = Math.max(0.2, CONFIG.reach + (e.key === ']' ? 0.05 : -0.05))
-  else if (num >= 0) startGame(num === 5 ? 'jump' : 'trace', MENU_SETS[num])
+  else if (num >= 0) { if (num !== 5) CONFIG.group = 'all'; startGame(num === 5 ? 'jump' : 'trace', MENU_SETS[num]) }
   else if (e.key === ' ') jump.fakeAt = performance.now()
   else if (scene === 'play' && mode === 'jump') {
     if (e.key === 'ArrowUp') CONFIG.jumpThreshold += 0.01
@@ -642,6 +725,16 @@ function drawTraceScreen(now) {
   }
   const ch = chars()[idx], say = typeof KANA_ROMAJI !== 'undefined' && KANA_ROMAJI[ch]
   if (say) { ctx.font = '700 64px system-ui'; ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fillText(say, 30, H - 60) } // how to say it
+  // "N to go" progress readout, over the active group's/set's character count
+  const left = chars().length - idx - 1
+  ctx.font = '600 30px system-ui'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,.75)'
+  ctx.fillText(left > 0 ? `🎯 ${left} to go` : '🎯 last one!', W - 24, 46)
+  // picture clue: emoji + word for the current character, when one exists (not every character has one)
+  const clue = typeof CLUES !== 'undefined' && CLUES[ch]
+  if (clue) {
+    ctx.textAlign = 'left'; ctx.font = '64px system-ui'; ctx.fillText(clue.emoji, 30, H - 145)
+    ctx.font = '600 32px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.fillText(clue.word, 30, H - 105)
+  }
 }
 
 let lastFrame = performance.now()
@@ -654,6 +747,7 @@ function draw() {
   else {
     for (const pl of active()) if (now - pl.lastPoseAt < 1500) drawAvatar(pl, now)
     if (scene === 'menu') drawMenu(now, dt)
+    else if (scene === 'groups') drawGroups(now, dt)
     else if (mode === 'trace') drawTraceScreen(now)
     else drawJump(now)
     if (now - lastPoseAt > 2500 && now > 4000) { // nobody in view
