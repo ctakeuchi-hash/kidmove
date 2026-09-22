@@ -7,7 +7,9 @@
   canvas{display:block}
   #hint{position:fixed;top:8px;left:12px;margin:0;color:#9ad;font:14px system-ui;opacity:.85}
 </style>
-<pre id="hint">Stage B: arrows/WASD to bank &amp; pitch, Space to flap</pre>
+<pre id="hint">Stage D: tilt your arms to bank &amp; pitch, flap to gain height (phone required - arrows/WASD/Space still work with no phone connected)</pre>
+<div id="banner" style="display:none;position:fixed;inset:0;align-items:center;justify-content:center;
+  flex-direction:column;color:#fff;font:800 56px system-ui;text-shadow:0 2px 12px #000;pointer-events:none"></div>
 
 <!-- No bundler in this repo (see tv-app/index.html) - Three.js is loaded straight from a CDN via a native
      browser import map, same "no build step" philosophy as the rest of tv-app. -->
@@ -28,9 +30,30 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 // first, exactly as Stage A calls for. Swap CREATURE_URL for the real asset later; no other code should need
 // to change (GLTFLoader + AnimationMixer usage is asset-agnostic).
 const CREATURE_URL = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r169/examples/models/gltf/Parrot.glb'
-const CANYON_GAP = 16      // horizontal gap between the two canyon walls
-const CANYON_LENGTH = 200  // how far one corridor segment extends
 const CHASE_OFFSET = new THREE.Vector3(0, 3, 9) // camera position relative to the creature
+
+// ---- Stage C maze: a plain array of gate definitions, so new layouts are just data - no rendering/physics
+// code to touch. Each gate is {z, gapX, gapWidth, gapY, gapHeight}: gapX/gapY is the center of the opening,
+// gapWidth/gapHeight is how big it is. gapY/gapHeight default to CRUISE_Y/CORRIDOR_HEIGHT (dead center,
+// full height = no vertical constraint) when omitted, so most gates only need to specify a horizontal move.
+// Difficulty is kept easy per the brief (4-and-under): generous widths, gentle x offsets, gates spaced far
+// enough apart (at the game's slowest speed, MIN_SPEED) to give several seconds to react - no fast reflexes. ----
+const CORRIDOR_BOTTOM = -10, CORRIDOR_TOP = 30, CORRIDOR_HEIGHT = CORRIDOR_TOP - CORRIDOR_BOTTOM
+const CORRIDOR_HALF_WIDTH = 14
+const CRUISE_Y = 8          // default/starting altitude - the vertical center most gates are built around
+const GATE_THICKNESS = 6    // how deep (along z) each gate's frame geometry/collision zone is
+const MAZE = [
+  { z: -45, gapX: 0, gapWidth: 12 },                                  // straight & wide - warm-up
+  { z: -90, gapX: 6, gapWidth: 9 },                                   // gentle bank right
+  { z: -135, gapX: -6, gapWidth: 9 },                                 // gentle bank left
+  { z: -180, gapX: 0, gapWidth: 9, gapY: 18, gapHeight: 14 },         // climb
+  { z: -225, gapX: 0, gapWidth: 9, gapY: 0, gapHeight: 14 },          // dive
+  { z: -270, gapX: 6, gapWidth: 9 },                                  // gentle bank right
+  { z: -315, gapX: -6, gapWidth: 9 },                                 // gentle bank left
+  { z: -360, gapX: 0, gapWidth: 12 },                                 // straight & wide - finish approach
+]
+const FINISH_Z = -400        // past the last gate; crossing this triggers the celebration
+const CELEBRATE_MS = 3000    // how long the celebration plays before looping back to the start
 
 // ---- Stage B tuning: all easily retunable from here, matching tv-app/index.html's CONFIG convention.
 // Bank/pitch self-level back to 0 when released - forgiving for young kids, same easy-difficulty philosophy
@@ -39,7 +62,7 @@ const CHASE_OFFSET = new THREE.Vector3(0, 3, 9) // camera position relative to t
 const MAX_BANK = 0.6, BANK_RATE = 2.2, BANK_LEVEL_RATE = 1.6, TURN_SPEED = 8   // rad, rad/s, rad/s, units/s per rad
 const MAX_PITCH = 0.5, PITCH_RATE = 2.2, PITCH_LEVEL_RATE = 1.6, PITCH_CLIMB_RATE = 6
 const FLAP_LIFT = 14, GRAVITY = 9, FLAP_ACCEL = 4, DRAG = 2, MIN_SPEED = 3, MAX_SPEED = 12, MAX_VY = 8
-const CREATURE_RADIUS = 1.5, Y_MIN = -4, Y_MAX = 14
+const CREATURE_RADIUS = 1.5, Y_MIN = CORRIDOR_BOTTOM + 2, Y_MAX = CORRIDOR_TOP - 4
 const WALL_BOUNCE_DAMPING = 0.85 // speed multiplier on hitting a wall - a brief slow-down, never a hard stop
 
 // ---- Input: arrow keys or WASD for bank/pitch, Space to flap. preventDefault so the page doesn't scroll. ----
@@ -48,6 +71,52 @@ const KEY_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'a', 'A', '
 addEventListener('keydown', (e) => { if (KEY_KEYS.includes(e.key)) { keys[e.key] = true; e.preventDefault() } })
 addEventListener('keyup', (e) => { keys[e.key] = false })
 const held = (...ks) => ks.some((k) => keys[k])
+
+// ---- Stage D: pose-driven flight controls. When a phone is streaming live pose data (fresher than
+// POSE_TIMEOUT_MS), it overrides the keyboard entirely for bank/pitch/flap; with no phone connected, the
+// Stage B keyboard controls keep working - handy for testing without a phone, and for A/B comparing feel.
+// Reuses the pose stream already flowing phone -> server -> TV for the main app's avatar (phone-app's `b`
+// body-keypoint array already includes shoulders + wrists), so no phone-app or server changes are needed. ----
+const POSE_TIMEOUT_MS = 500
+// Tune these against REAL pose data once you can playtest with a phone (Stage E's job) - normalized-coordinate
+// ranges vary with how far the phone is from the player, so these starting values are a best guess, not measured.
+const BANK_SIGN = 1            // flip to -1 if banking feels backward once tested for real
+const POSE_TILT_GAIN = 1.0     // how much wrist/shoulder tilt (in shoulder-widths) maps to full bank/pitch
+const FLAP_VELOCITY_THRESHOLD = 1.2 // normalized-y-units/sec of upward wrist motion that counts as a flap
+const FLAP_HOLD_MS = 400       // how long one detected flap gesture keeps thrust engaged
+
+let lastPoseAt = -1e9, poseBank = 0, posePitch = 0, flapHoldUntil = 0
+const wristYHistory = [] // rolling {t, y} window used to detect a rapid upward flap motion
+const clamp1 = (v) => Math.max(-1, Math.min(1, v))
+
+// b = the phone's full body keypoint array, in phone-app's BODY order: [nose, Lsh, Rsh, Lel, Rel, Lwr, Rwr, Lhip, Rhip, ...]
+function onPose(b) {
+  const [, lsh, rsh, , , lwr, rwr] = b
+  const shoulderW = Math.abs(rsh[0] - lsh[0]) || 0.001 // normalizes tilt by how big the person appears - distance-invariant
+  const shoulderY = (lsh[1] + rsh[1]) / 2, avgWristY = (lwr[1] + rwr[1]) / 2
+
+  // Bank: wrists tilted like airplane wings - left wrist higher (smaller y) than right = bank right.
+  poseBank = BANK_SIGN * clamp1(((rwr[1] - lwr[1]) / shoulderW) * POSE_TILT_GAIN)
+  // Pitch: average wrist height relative to shoulders - arms raised (smaller y) = climb.
+  posePitch = clamp1(((shoulderY - avgWristY) / shoulderW) * POSE_TILT_GAIN)
+
+  const now = performance.now()
+  wristYHistory.push({ t: now, y: avgWristY })
+  while (wristYHistory.length && now - wristYHistory[0].t > 300) wristYHistory.shift()
+  const oldest = wristYHistory[0]
+  if (oldest && now - oldest.t > 80) { // need a little time spread for a meaningful velocity estimate
+    const velocity = (oldest.y - avgWristY) / ((now - oldest.t) / 1000) // positive = moving up
+    if (velocity > FLAP_VELOCITY_THRESHOLD) flapHoldUntil = now + FLAP_HOLD_MS
+  }
+  lastPoseAt = now
+}
+const poseLive = () => performance.now() - lastPoseAt < POSE_TIMEOUT_MS
+
+const ws = new WebSocket(`wss://${location.host}/?role=tv`)
+ws.onmessage = (e) => {
+  const m = JSON.parse(e.data)
+  if (m.type === 'kp') { const b = (m.ps?.[0] || m).b; if (b) onPose(b) }
+}
 
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0x0b0b1a)
@@ -70,29 +139,40 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.1)
 sun.position.set(15, 25, 10)
 scene.add(sun)
 
-// ---- Canyon: two long walls with a gap between them, running away from the camera. Simple flat colors
-// ("textured simply" per the brief) - real texturing/segments come in Stage C's maze rework. ----
-const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a6a4f, roughness: 0.95 })
-const wallGeo = new THREE.BoxGeometry(20, 60, CANYON_LENGTH)
-for (const side of [-1, 1]) {
-  const wall = new THREE.Mesh(wallGeo, wallMat)
-  wall.position.set(side * (CANYON_GAP / 2 + 10), 10, -CANYON_LENGTH / 2)
-  scene.add(wall)
-}
+// ---- Canyon: a continuous floor the length of the maze, plus one "gate" per MAZE entry - a picture-frame
+// of up to 4 simple boxes (left/right sides always, floor/ceiling risers only when a gate is vertically
+// constrained) built purely from each entry's data. Simple flat colors ("textured simply" per the brief). ----
+const floorLen = -FINISH_Z + 40
 const floor = new THREE.Mesh(
-  new THREE.PlaneGeometry(CANYON_GAP + 40, CANYON_LENGTH),
+  new THREE.PlaneGeometry(CORRIDOR_HALF_WIDTH * 2, floorLen),
   new THREE.MeshStandardMaterial({ color: 0x2c2f22 }),
 )
 floor.rotation.x = -Math.PI / 2
-floor.position.set(0, -6, -CANYON_LENGTH / 2)
+floor.position.set(0, CORRIDOR_BOTTOM, FINISH_Z / 2)
 scene.add(floor)
+
+const gateMat = new THREE.MeshStandardMaterial({ color: 0x8a6a4f, roughness: 0.95 })
+function addBox(w, h, x, y, z) {
+  if (w <= 0.05 || h <= 0.05) return // a gate as wide/tall as the corridor needs no riser on that side
+  const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, GATE_THICKNESS), gateMat)
+  box.position.set(x, y, z)
+  scene.add(box)
+}
+for (const g of MAZE) {
+  const gapY = g.gapY ?? CRUISE_Y, gapHeight = g.gapHeight ?? CORRIDOR_HEIGHT
+  const leftEdge = g.gapX - g.gapWidth / 2, rightEdge = g.gapX + g.gapWidth / 2
+  addBox(leftEdge - (-CORRIDOR_HALF_WIDTH), CORRIDOR_HEIGHT, (-CORRIDOR_HALF_WIDTH + leftEdge) / 2, (CORRIDOR_BOTTOM + CORRIDOR_TOP) / 2, g.z) // left side
+  addBox(CORRIDOR_HALF_WIDTH - rightEdge, CORRIDOR_HEIGHT, (rightEdge + CORRIDOR_HALF_WIDTH) / 2, (CORRIDOR_BOTTOM + CORRIDOR_TOP) / 2, g.z) // right side
+  addBox(g.gapWidth, (gapY - gapHeight / 2) - CORRIDOR_BOTTOM, g.gapX, (CORRIDOR_BOTTOM + (gapY - gapHeight / 2)) / 2, g.z) // floor riser (climb gates)
+  addBox(g.gapWidth, CORRIDOR_TOP - (gapY + gapHeight / 2), g.gapX, (CORRIDOR_TOP + (gapY + gapHeight / 2)) / 2, g.z)     // ceiling riser (dive gates)
+}
 
 // ---- Creature: loads async, plays its first animation clip on loop ----
 let mixer, creature
 new GLTFLoader().load(CREATURE_URL, (gltf) => {
   creature = gltf.scene
   creature.scale.setScalar(0.04) // Parrot.glb is modeled much larger than our scene units
-  creature.position.set(0, 1, 0)
+  creature.position.set(0, CRUISE_Y, 0)
   creature.rotation.y = Math.PI // face away from the camera, down the canyon (its direction of travel)
   scene.add(creature)
   if (gltf.animations.length) {
@@ -107,50 +187,118 @@ new GLTFLoader().load(CREATURE_URL, (gltf) => {
 
 // ---- Flight physics state ----
 let bank = 0, pitch = 0, vy = 0, speed = MIN_SPEED
+let finished = false, finishAt = 0
+
+function resetFlight() {
+  creature.position.set(0, CRUISE_Y, 0)
+  bank = pitch = vy = 0; speed = MIN_SPEED; finished = false
+  banner.style.display = 'none'
+  for (const p of confetti.splice(0)) scene.remove(p.mesh)
+}
+
+// The gate whose collision zone the creature is currently inside (z within GATE_THICKNESS/2 of a gate's z),
+// or null between gates - most of the corridor is open flying space with nothing to collide with.
+function currentGate() {
+  const z = creature.position.z
+  return MAZE.find((g) => Math.abs(z - g.z) < GATE_THICKNESS / 2) || null
+}
 
 function stepPhysics(dt) {
-  // Bank: ramp toward the held direction's max, self-level toward 0 otherwise; steer x by the bank angle.
-  const bankTarget = held('ArrowLeft', 'a', 'A') ? -MAX_BANK : held('ArrowRight', 'd', 'D') ? MAX_BANK : 0
+  const pose = poseLive() // fresh phone pose data takes over from the keyboard entirely when present
+
+  // Bank: ramp toward the held/pose direction's max, self-level toward 0 otherwise; steer x by the bank angle.
+  const bankTarget = pose ? poseBank * MAX_BANK : held('ArrowLeft', 'a', 'A') ? -MAX_BANK : held('ArrowRight', 'd', 'D') ? MAX_BANK : 0
   const bankRate = bankTarget === 0 ? BANK_LEVEL_RATE : BANK_RATE
   bank += Math.sign(bankTarget - bank) * Math.min(Math.abs(bankTarget - bank), bankRate * dt)
   creature.rotation.z = -bank
   creature.position.x += Math.sin(bank) * TURN_SPEED * dt
 
   // Pitch: same shape, feeding a direct climb/dive rate.
-  const pitchTarget = held('ArrowUp', 'w', 'W') ? MAX_PITCH : held('ArrowDown', 's', 'S') ? -MAX_PITCH : 0
+  const pitchTarget = pose ? posePitch * MAX_PITCH : held('ArrowUp', 'w', 'W') ? MAX_PITCH : held('ArrowDown', 's', 'S') ? -MAX_PITCH : 0
   const pitchRate = pitchTarget === 0 ? PITCH_LEVEL_RATE : PITCH_RATE
   pitch += Math.sign(pitchTarget - pitch) * Math.min(Math.abs(pitchTarget - pitch), pitchRate * dt)
   creature.rotation.x = pitch
   creature.position.y += Math.sin(pitch) * PITCH_CLIMB_RATE * dt
 
-  // Flap: holding gains altitude + forward speed; releasing lets both bleed off gradually (glide-then-sink).
-  if (held(' ')) { vy += FLAP_LIFT * dt; speed = Math.min(MAX_SPEED, speed + FLAP_ACCEL * dt) }
+  // Flap: holding (or a detected flap gesture) gains altitude + forward speed; releasing lets both bleed off
+  // gradually (glide-then-sink).
+  const flapping = pose ? performance.now() < flapHoldUntil : held(' ')
+  if (flapping) { vy += FLAP_LIFT * dt; speed = Math.min(MAX_SPEED, speed + FLAP_ACCEL * dt) }
   else { vy -= GRAVITY * dt; speed = Math.max(MIN_SPEED, speed - DRAG * dt) }
   vy = Math.max(-MAX_VY, Math.min(MAX_VY, vy))
   creature.position.y += vy * dt
   if (creature.position.y < Y_MIN) { creature.position.y = Y_MIN; vy = Math.max(0, vy) }
   else if (creature.position.y > Y_MAX) { creature.position.y = Y_MAX; vy = Math.min(0, vy) }
 
-  // Forward motion + endless corridor loop.
+  // Forward motion.
   creature.position.z -= speed * dt
-  if (creature.position.z < -CANYON_LENGTH) creature.position.z = 0
 
-  // Wall collision: gentle bounce-back + brief slow-down, never a hard stop (matches Jump Dodge's low-stakes misses).
-  // Damping is floored at MIN_SPEED so leaning into a wall settles into a brief slow-down, never drains
-  // toward zero/negative if the player keeps holding the bank key against it.
-  const halfGap = CANYON_GAP / 2 - CREATURE_RADIUS
-  if (creature.position.x > halfGap) { creature.position.x = halfGap; bank = -Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
-  else if (creature.position.x < -halfGap) { creature.position.x = -halfGap; bank = Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+  // Gate collision: gentle bounce-back + brief slow-down, never a hard stop (matches Jump Dodge's low-stakes
+  // misses). Damping is floored at MIN_SPEED so leaning into a wall settles into a brief slow-down, never
+  // drains toward zero/negative if the player keeps holding the bank/pitch key against it.
+  const gate = currentGate()
+  if (gate) {
+    const halfW = gate.gapWidth / 2 - CREATURE_RADIUS
+    if (creature.position.x > gate.gapX + halfW) { creature.position.x = gate.gapX + halfW; bank = -Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+    else if (creature.position.x < gate.gapX - halfW) { creature.position.x = gate.gapX - halfW; bank = Math.abs(bank) * 0.5; speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+    const gapY = gate.gapY ?? CRUISE_Y, gapHeight = gate.gapHeight ?? CORRIDOR_HEIGHT
+    if (gapHeight < CORRIDOR_HEIGHT - 0.5) { // only gates with a real vertical constraint can collide on y
+      const halfH = gapHeight / 2 - CREATURE_RADIUS
+      if (creature.position.y > gapY + halfH) { creature.position.y = gapY + halfH; vy = Math.min(0, vy); speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+      else if (creature.position.y < gapY - halfH) { creature.position.y = gapY - halfH; vy = Math.max(0, vy); speed = Math.max(MIN_SPEED, speed * WALL_BOUNCE_DAMPING) }
+    }
+  }
+
+  // Finish: crossing the end of the maze celebrates, then loops back to the start after a pause.
+  if (!finished && creature.position.z < FINISH_Z) {
+    finished = true; finishAt = performance.now()
+    banner.textContent = '🎉 You flew the canyon! 🎉'; banner.style.display = 'flex'
+    spawnConfetti(creature.position)
+  }
 }
 
-window.DEBUG = { scene, camera, get creature() { return creature }, get physics() { return { bank, pitch, speed, vy } } }
+// ---- Confetti: a handful of small colored boxes that pop out and fall - the 3D equivalent of the 2D
+// games' celebration effects, kept simple (no particle system library, plain meshes + gravity). ----
+const confetti = []
+function spawnConfetti(at) {
+  for (let i = 0; i < 40; i++) {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.4, 0.4, 0.4),
+      new THREE.MeshStandardMaterial({ color: Math.random() * 0xffffff }),
+    )
+    mesh.position.copy(at)
+    scene.add(mesh)
+    confetti.push({ mesh, v: new THREE.Vector3((Math.random() - 0.5) * 10, Math.random() * 8 + 4, (Math.random() - 0.5) * 10), born: performance.now() })
+  }
+}
+function updateConfetti(dt) {
+  const now = performance.now()
+  for (let i = confetti.length - 1; i >= 0; i--) {
+    const p = confetti[i]
+    p.v.y -= 12 * dt
+    p.mesh.position.addScaledVector(p.v, dt)
+    p.mesh.rotation.x += dt * 4; p.mesh.rotation.y += dt * 3
+    if (now - p.born > 2500) { scene.remove(p.mesh); confetti.splice(i, 1) }
+  }
+}
+
+const banner = document.getElementById('banner')
+window.DEBUG = {
+  scene, camera, onPose, // onPose exposed so a phone-less test can feed a synthetic body-keypoint array directly
+  get creature() { return creature },
+  get physics() { return { bank, pitch, speed, vy } },
+  get finished() { return finished },
+  get pose() { return { live: poseLive(), poseBank, posePitch, flapping: performance.now() < flapHoldUntil } },
+}
 
 let last = performance.now()
 function tick(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now
   mixer?.update(dt)
   if (creature) {
-    stepPhysics(dt)
+    if (finished) { if (now - finishAt > CELEBRATE_MS) resetFlight() }
+    else stepPhysics(dt)
+    updateConfetti(dt)
     camera.position.set(creature.position.x + CHASE_OFFSET.x, creature.position.y + CHASE_OFFSET.y, creature.position.z + CHASE_OFFSET.z)
     camera.lookAt(creature.position.x, creature.position.y + 0.5, creature.position.z)
   }
