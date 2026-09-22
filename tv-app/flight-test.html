@@ -196,8 +196,7 @@ for (let z = 10; z > FINISH_Z - 10; z -= 16) { // ponytail: sparse on purpose - 
 
 // Mountains: a continuous jagged skyline of smooth (high-segment, not low-poly-faceted) cone peaks along both
 // sides, well above the flyable corridor (CORRIDOR_TOP) so they're pure backdrop, never collidable. Taller
-// peaks get a small white snow cap. addSpire() reuses the same look at a fixed, narrower size for the gate
-// overpass supports below, instead of scaling a background peak's radius (which is wide relative to a gap).
+// peaks get a small white snow cap. rockMat is reused below by addRockMass() for the collidable obstacles.
 const rockMat = new THREE.MeshStandardMaterial({ color: 0x6e6459, roughness: 0.95 })
 const snowMat = new THREE.MeshStandardMaterial({ color: 0xf0f2f5, roughness: 0.8 })
 function addPeak(x, z, h, radius = h * 0.55) {
@@ -211,7 +210,6 @@ function addPeak(x, z, h, radius = h * 0.55) {
     scene.add(cap)
   }
 }
-const addSpire = (x, z, h) => addPeak(x, z, h, 1.4) // narrow mountain spire flanking a gate gap - see MAZE loop below
 for (let z = 25; z > FINISH_Z - 25; z -= 26) {
   addPeak(CORRIDOR_HALF_WIDTH + 6 + Math.random() * 10, z + Math.random() * 8, 24 + Math.random() * 20)
   addPeak(-CORRIDOR_HALF_WIDTH - 6 - Math.random() * 10, z + Math.random() * 8, 24 + Math.random() * 20)
@@ -232,30 +230,33 @@ for (let z = 20; z > FINISH_Z - 20; z -= 45) {
   addCloud((Math.random() - 0.5) * CORRIDOR_HALF_WIDTH * 1.6, CRUISE_Y + 6 + Math.random() * 10, z + Math.random() * 15, 1.5 + Math.random())
 }
 
-const gateMat = new THREE.MeshStandardMaterial({ color: 0x8a6a4f, roughness: 0.95 })
-function addBox(w, h, x, y, z) {
-  if (w <= 0.05 || h <= 0.05) return // a gate as wide/tall as the corridor needs no riser on that side
-  const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, GATE_THICKNESS), gateMat)
-  box.position.set(x, y, z)
-  scene.add(box)
+// Every collidable obstacle (walls, ceiling risers, floor risers) is now a rock mass built from a row of
+// overlapping mountain cones instead of a flat box - the route through the maze is walled in and roofed by
+// actual mountains, not architecture. addRockMass() fills the same rectangular footprint (xCenter/width,
+// yBase/height) that the invisible AABB collision below still uses, so gameplay is completely unchanged -
+// only what gets rendered there changed. Overlapping cone radii (wider than their spacing) keep there from
+// being gaps you could see daylight through.
+function addRockMass(xCenter, width, yBase, height, z) {
+  if (width <= 0.05 || height <= 0.05) return
+  const n = Math.max(1, Math.round(width / 4.5))
+  const colWidth = width / n
+  for (let i = 0; i < n; i++) {
+    const x = xCenter - width / 2 + colWidth * (i + 0.5) + (Math.random() - 0.5) * colWidth * 0.3
+    const h = height * (0.95 + Math.random() * 0.35) // slightly tall/jagged rather than exactly filling the box
+    const radius = colWidth * 0.75 // > colWidth/2 so neighboring cones overlap, no visible gaps
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(radius, h, 16), rockMat)
+    cone.position.set(x, yBase + h / 2, z + (Math.random() - 0.5) * GATE_THICKNESS * 0.4)
+    scene.add(cone)
+  }
 }
 for (const g of MAZE) {
   const gapY = g.gapY ?? CRUISE_Y, gapHeight = g.gapHeight ?? CORRIDOR_HEIGHT
   const leftEdge = g.gapX - g.gapWidth / 2, rightEdge = g.gapX + g.gapWidth / 2
-  addBox(leftEdge - (-CORRIDOR_HALF_WIDTH), CORRIDOR_HEIGHT, (-CORRIDOR_HALF_WIDTH + leftEdge) / 2, (CORRIDOR_BOTTOM + CORRIDOR_TOP) / 2, g.z) // left mountain slope
-  addBox(CORRIDOR_HALF_WIDTH - rightEdge, CORRIDOR_HEIGHT, (rightEdge + CORRIDOR_HALF_WIDTH) / 2, (CORRIDOR_BOTTOM + CORRIDOR_TOP) / 2, g.z) // right mountain slope
-  addBox(g.gapWidth, (gapY - gapHeight / 2) - CORRIDOR_BOTTOM, g.gapX, (CORRIDOR_BOTTOM + (gapY - gapHeight / 2)) / 2, g.z) // rocky hill (climb gates)
-  const ceilingH = CORRIDOR_TOP - (gapY + gapHeight / 2)
-  addBox(g.gapWidth, ceilingH, g.gapX, (CORRIDOR_TOP + (gapY + gapHeight / 2)) / 2, g.z) // stone overpass span (dive gates)
-  // Overpass supports: only a real "duck under this" ceiling riser (dive gates) gets mountain spires flanking
-  // the gap, reaching up from the ground to the span above - so it reads as a natural rock pass between two
-  // peaks, not a slab floating in mid-air. Climb gates also get a thin ceiling cap above (harmless), but it's
-  // too small to need supports.
-  if (ceilingH > 10) {
-    const spireH = CORRIDOR_HEIGHT - ceilingH
-    addSpire(g.gapX - g.gapWidth / 2 + 1.4, g.z, spireH)
-    addSpire(g.gapX + g.gapWidth / 2 - 1.4, g.z, spireH)
-  }
+  const floorH = (gapY - gapHeight / 2) - CORRIDOR_BOTTOM, ceilingH = CORRIDOR_TOP - (gapY + gapHeight / 2)
+  addRockMass((-CORRIDOR_HALF_WIDTH + leftEdge) / 2, leftEdge - (-CORRIDOR_HALF_WIDTH), CORRIDOR_BOTTOM, CORRIDOR_HEIGHT, g.z) // left mountain wall
+  addRockMass((rightEdge + CORRIDOR_HALF_WIDTH) / 2, CORRIDOR_HALF_WIDTH - rightEdge, CORRIDOR_BOTTOM, CORRIDOR_HEIGHT, g.z) // right mountain wall
+  addRockMass(g.gapX, g.gapWidth, CORRIDOR_BOTTOM, floorH, g.z) // rocky hill you climb over (climb gates)
+  addRockMass(g.gapX, g.gapWidth, gapY + gapHeight / 2, ceilingH, g.z) // mountain ridge you duck under (dive gates)
 }
 
 // ---- Creature: a horse body with bird wings, built from primitive geometry (boxes/cones/cylinders), same
