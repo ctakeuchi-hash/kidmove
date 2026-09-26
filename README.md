@@ -6,6 +6,7 @@ Your phone's camera tracks your body → the server relays it → a TV-connected
 - **Trace** (arm-writing): capital letters (ABC), small letters (abc), numbers (123), Japanese **hiragana** (あ) and **katakana** (ア). Follow the numbered start dot and arrows, stroke by stroke, in the right order and direction. Practice a subset (vowels/consonants, or a kana row) and shuffle the order; each character shows a picture+word clue while you trace it.
 - **Jump Dodge**: jump over spikes.
 - **Alicorn Flight**: fly through a mountain landscape - bank/pitch with your arms (or keyboard) and flap to climb. Dodge freestanding boulders and thread bridge/hill gates cleanly for points; hitting one just bounces you gently, no fail state. 4 levels of increasing difficulty, each its own themed landscape (Green Valley → Red Canyon → Snowy Peaks → Dusk Peaks), auto-advancing on finish and carrying your score forward - loops back to Green Valley with a fresh score after Dusk Peaks. `?level=2` jumps straight to a level.
+- **Katamari**: roll a sticky ball around and pick up anything smaller than it to grow, just like the video game. Spin both hands forward (like cranking a wheel) to roll forward, spin them backward to back up; spin one hand faster than the other to turn, tank-style - so one hand alone still steers. No fail state: bumping something too big just bounces you off gently. Clearing an arena celebrates and starts a fresh, slightly bigger one.
 - **1 or 2 players**: in Trace, two people (one on each side of the room) trace the same character together; it counts as done when both finish.
 
 ## What you need
@@ -44,7 +45,7 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 
 | What | How |
 |---|---|
-| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `Esc` menu, `P` 1/2 players |
+| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `8` Katamari, `Esc` menu, `P` 1/2 players |
 | How much of each stroke is needed | `↑`/`↓` or `?threshold=0.7` |
 | How far your hand may stray from the line | `?brush=0.12` (bigger = more forgiving) |
 | Easier to start a stroke | `?startZone=3` (the glowing circle around the yellow dot; default 2.5), `?resumeZone=2.5` |

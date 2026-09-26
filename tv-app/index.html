@@ -20,7 +20,7 @@
 <script>
 // ---- Config: override any of these via URL, e.g. /tv/?set=hiragana&players=2&threshold=0.7&mouse=1 ----
 // Start straight into a game with ?game=jump or ?set=upper|lower|digits|hiragana|katakana (no param = menu).
-// Keys: 1-5 pick a character set, 6 Jump Dodge, 7 Alicorn Flight, P = 1/2 players, Esc = menu, ←/→ = prev/next character, ↑/↓ = how much of a stroke is needed
+// Keys: 1-5 pick a character set, 6 Jump Dodge, 7 Alicorn Flight, 8 Katamari, P = 1/2 players, Esc = menu, ←/→ = prev/next character, ↑/↓ = how much of a stroke is needed
 // (Jump: jump size), [ ] = arm reach, M = mute, Space = fake jump (testing), Enter = new session after the break scene.
 const CONFIG = {
   threshold: 0.85,  // fraction of each stroke you must trace to complete it
@@ -428,10 +428,11 @@ document.getElementById('btnSkip').onclick = () => loadChar(idx + 1)
 document.getElementById('snd').onclick = () => { if (actx && actx.state === 'running') { muted = !muted; syncBar() } }
 
 // ---- Menu scene: big buttons, pressed by clicking, by holding your hand on one, or from the phone ----
-const MENU_SETS = ['trace', 'jump', 'flight'] // the 3 games; picking 'trace' leads to the sets screen to choose a character set
+const MENU_SETS = ['trace', 'jump', 'flight', 'katamari'] // the games; picking 'trace' leads to the sets screen to choose a character set
 let dwell = null, mouseXY = null
 function menuRects() {
-  const cw = W * 0.24, chh = H * 0.3, gx = W * 0.03, x0 = (W - (3 * cw + 2 * gx)) / 2, y0 = H * 0.34
+  const n = MENU_SETS.length, gx = W * 0.02, chh = H * 0.3
+  const cw = Math.min(W * 0.24, (W * 0.94 - (n - 1) * gx) / n), x0 = (W - (n * cw + (n - 1) * gx)) / 2, y0 = H * 0.34
   return [
     ...[1, 2].map((n, i) => ({ id: 'p' + n, n, x: W / 2 - W * 0.17 + i * W * 0.18, y: H * 0.17, w: W * 0.16, h: H * 0.08 })),
     ...MENU_SETS.map((id, i) => ({ id, x: x0 + i * (cw + gx), y: y0, w: cw, h: chh })),
@@ -443,6 +444,7 @@ function pressMenu(r) {
   if (r.n) { setPlayers(r.n); return }
   if (r.id === 'jump') { startGame('jump'); return }
   if (r.id === 'flight') { location.href = 'flight-test.html'; return }
+  if (r.id === 'katamari') { location.href = 'katamari.html'; return }
   pickSet() // 'trace' leads to the sets screen to choose upper/lower/digits/hiragana/katakana
 }
 function menuPointers(now) { // hands (fresh poses) and the mouse
@@ -550,7 +552,7 @@ function drawMenu(now, dt) {
     ctx.fillStyle = '#fff'
     if (r.n) { ctx.font = '700 34px system-ui'; ctx.textBaseline = 'middle'; ctx.fillText(r.n === 1 ? '1 Player' : '2 Players', r.x + r.w / 2, r.y + r.h / 2 + 2) }
     else {
-      const label = { trace: ['✏️', 'Letters & Numbers'], jump: ['🦘', 'Jump Dodge'], flight: ['🦄', 'Alicorn Flight'] }[r.id]
+      const label = { trace: ['✏️', 'Letters & Numbers'], jump: ['🦘', 'Jump Dodge'], flight: ['🦄', 'Alicorn Flight'], katamari: ['🌀', 'Katamari'] }[r.id]
       ctx.font = `800 ${r.h * 0.28}px system-ui`; ctx.fillText(label[0], r.x + r.w / 2, r.y + r.h * 0.4)
       ctx.font = '600 30px system-ui'; ctx.fillText(label[1], r.x + r.w / 2, r.y + r.h * 0.58)
     }
@@ -720,13 +722,14 @@ function drawJump(now) {
 
 // ---- Keyboard ----
 addEventListener('keydown', (e) => {
-  const num = '1234567'.indexOf(e.key)
+  const num = '12345678'.indexOf(e.key)
   if (e.key === 'Enter' && sessionOver) startSession()
   else if (e.key === 'Escape') showMenu()
   else if (e.key === 'm' || e.key === 'M') { muted = !muted; syncBar() }
   else if (e.key === 'p' || e.key === 'P') setPlayers(nPlayers === 1 ? 2 : 1)
   else if (e.key === '[' || e.key === ']') CONFIG.reach = Math.max(0.2, CONFIG.reach + (e.key === ']' ? 0.05 : -0.05))
   else if (num === 6) location.href = 'flight-test.html'
+  else if (num === 7) location.href = 'katamari.html'
   else if (num >= 0) { if (num !== 5) CONFIG.group = 'all'; startGame(num === 5 ? 'jump' : 'trace', CHAR_SETS[num]) }
   else if (e.key === ' ') jump.fakeAt = performance.now()
   else if (scene === 'play' && mode === 'jump') {
