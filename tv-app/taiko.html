@@ -7,8 +7,19 @@
   canvas{display:block;width:100vw;height:100vh}
   #hint{position:fixed;top:8px;left:12px;margin:0;color:#e8dcff;font:14px system-ui;opacity:.85;max-width:70vw}
   #ver{position:fixed;right:12px;bottom:8px;color:#9b8bb0;font:14px monospace}
+  #spotifyBtn{position:fixed;top:52px;left:12px;font:600 15px system-ui;padding:7px 14px;border-radius:20px;border:2px solid #1ed76066;background:#111a;color:#1ed760;cursor:pointer}
+  #spotifyPanel{display:none;position:fixed;inset:0;background:#000c;align-items:center;justify-content:center;z-index:10;font:16px system-ui;color:#fff}
+  #spotifyPanelBody{background:#1a1a2e;padding:26px 32px;border-radius:20px;max-width:560px;width:88vw;max-height:82vh;overflow:auto;text-align:center;box-shadow:0 10px 40px #000a}
+  #spotifyPanelBody input{width:88%;padding:10px;border-radius:10px;border:none;font:16px system-ui}
+  #spotifyPanelBody button{font:700 16px system-ui;padding:10px 20px;border-radius:14px;border:none;background:#1ed760;color:#000;cursor:pointer;margin:6px 4px}
+  #spotifyPanelBody button.ghost{background:none;border:2px solid #fff5;color:#fff;font-weight:600}
+  #spotifyPanelBody button:disabled{opacity:.4;cursor:default}
+  .spTrack{padding:8px;border-radius:10px;cursor:pointer;display:flex;gap:10px;align-items:center;text-align:left}
+  .spTrack:hover{background:#ffffff14}
 </style>
 <pre id="hint">Drum along to the beat! Swing a hand down like a drumstick when a note reaches the ring - left hand for the blue lane, right hand for the orange lane. No phone: F/J keys or click the top/bottom half. Esc for menu.</pre>
+<button id="spotifyBtn">🎵 Spotify</button>
+<div id="spotifyPanel"><div id="spotifyPanelBody"></div></div>
 <div id="ver"></div>
 <canvas id="c"></canvas>
 <script>
@@ -17,15 +28,17 @@
 // (kp messages relayed from phone-app, see onPose below - reuses the same BODY keypoint order flight-test.html
 // reads, no phone-app or server changes needed). No fail state, same philosophy as Trace/Jump/Flight: the
 // backing beat always plays in full regardless of how well you hit it, so it always sounds like a real song;
-// good timing just adds score, sparkle and a happier drum face. 4 songs of increasing tempo/density, auto-
-// advancing on finish and carrying score forward, looping back to song 1 with a fresh score after the last -
-// same convention as flight-test.html's LEVELS. ?song=2 jumps straight to a song.
+// good timing just adds score, sparkle and a happier drum face. 4 built-in songs of increasing tempo/density,
+// auto-advancing on finish and carrying score forward, looping back to song 1 with a fresh score after the last
+// - same convention as flight-test.html's LEVELS. ?song=2 jumps straight to a song. The 🎵 Spotify button (see
+// the "Optional: Spotify" section below) swaps the synthesized beat for a real track a grown-up picks - fully
+// additive, never required.
 fetch('/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => document.getElementById('ver').textContent = 'v' + v.version).catch(() => {})
 
 // ---- Songs: bars are 8-character strings, one char per eighth note (2 chars per beat, 4/4 time).
 // '.' = rest, 'L' = left-hand note, 'R' = right-hand note, 'B' = both hands at once. ----
 function altBars(a, b, n) { const out = []; for (let i = 0; i < n; i++) out.push(a, b); return out }
-function buildSong(name, bpm, bars, theme) {
+function notesFromBars(bpm, bars) {
   const stepMs = 60000 / bpm / 2, notes = []
   let step = 0
   for (const bar of bars) {
@@ -35,8 +48,9 @@ function buildSong(name, bpm, bars, theme) {
       step++
     }
   }
-  return { name, bpm, notes, totalMs: step * stepMs, theme }
+  return { notes, totalMs: step * stepMs }
 }
+function buildSong(name, bpm, bars, theme) { const { notes, totalMs } = notesFromBars(bpm, bars); return { name, bpm, notes, totalMs, theme } }
 const SONGS = [
   buildSong('Sunshine Beat', 78, Array(8).fill('L...R...'), { bg: ['#fff2b0', '#7fc8f8'] }),
   buildSong('Bouncy Bus', 96, altBars('L.R.L.R.', 'L.RBL.R.', 6), { bg: ['#c8f7c5', '#4fb3ff'] }),
@@ -45,8 +59,6 @@ const SONGS = [
 ]
 const params = new URLSearchParams(location.search)
 let score = parseInt(params.get('score')) || 0
-const songIdx = Math.max(0, Math.min(SONGS.length - 1, (parseInt(params.get('song')) || 1) - 1))
-const song = SONGS[songIdx]
 
 const cv = document.getElementById('c'), ctx = cv.getContext('2d')
 let W, H
@@ -56,16 +68,23 @@ const laneY = (l) => l === 0 ? H * 0.36 : H * 0.62
 const targetX = () => W * 0.14
 const spawnX = () => W * 1.05
 
-// ---- Timing: a short lead-in count-in before the beat starts, matching the DRUM_STAGES text below. ----
+// ---- Timing: a short lead-in count-in before the beat starts, matching the STAGES text below. `song`/`songIdx`/
+// `mode`/`t0` are mutable - startBuiltinSong() and startSpotifySong() (below) both (re)initialize them, so picking
+// a Spotify track mid-session swaps the running game without a page reload. ----
 const COUNTDOWN_MS = 2800, NOTE_TRAVEL_MS = 1700, HIT_WINDOW_MS = 260, TAIL_MS = 1200, CELEBRATE_MS = 3000
 const STAGES = ['3', '2', '1', 'Drum!']
-const t0 = performance.now() + COUNTDOWN_MS // the moment beat 0 happens; notes/countdown are all relative to this
+let mode = 'builtin', songIdx = 0, song = null, t0 = 0
 let phase = 'countdown', celebrateAt = null, combo = 0, bestCombo = 0
 const drumPulse = [0, 0]
 const pulse = (l, amt) => { drumPulse[l] = Math.max(drumPulse[l], amt) }
+function startBuiltinSong(idx) {
+  mode = 'builtin'; songIdx = Math.max(0, Math.min(SONGS.length - 1, idx)); song = SONGS[songIdx]
+  combo = 0; bestCombo = 0; phase = 'countdown'; t0 = performance.now() + COUNTDOWN_MS
+}
 
 // ---- Audio: everything synthesised, no files (see tv-app/index.html's sfx for the same convention). The
-// backing beat (drumHit) always plays on schedule; a correct swing layers a bright chime on top. ----
+// backing beat (drumHit) always plays on schedule in builtin mode; a correct swing always layers a bright chime
+// on top, in both modes (a real Spotify track supplies its own beat, so drumHit is skipped there - see draw()). ----
 let actx, muted = false
 const audioOn = () => actx && actx.state === 'running' && !muted
 function tone(f, t0 = 0, dur = 0.3, vol = 0.2, type = 'triangle') {
@@ -112,7 +131,7 @@ function drawConfetti() {
 }
 
 // ---- Hitting a note: the nearest not-yet-resolved note in that lane, within HIT_WINDOW_MS either side of now.
-// Missing entirely is silent and score-neutral (no fail state) - the backing beat played it anyway. ----
+// Missing entirely is silent and score-neutral (no fail state) - the beat played on regardless. ----
 function strike(lane) {
   if (phase !== 'playing') return
   const elapsed = performance.now() - t0
@@ -150,14 +169,174 @@ function onPose(b) {
 }
 const ws = new WebSocket(`wss://${location.host}/?role=tv`)
 ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type === 'kp') { const b = (m.ps?.[0] || m).b; if (b) onPose(b) } }
-addEventListener('pointerdown', (e) => { unlock(); if (e.clientY < H / 2) strike(0); else strike(1) })
+addEventListener('pointerdown', (e) => { unlock(); if (e.target.closest('#spotifyPanel, #spotifyBtn')) return; if (e.clientY < H / 2) strike(0); else strike(1) })
 addEventListener('keydown', (e) => {
   unlock()
+  if (document.getElementById('spotifyPanel').style.display === 'flex') return // don't drum while typing/tapping in the panel
   if (e.key === 'Escape') location.href = 'index.html'
   else if (e.key === 'f' || e.key === 'F' || e.key === 'ArrowLeft') strike(0)
   else if (e.key === 'j' || e.key === 'J' || e.key === 'ArrowRight') strike(1)
   else if (e.key === 'm' || e.key === 'M') muted = !muted
 })
+
+// ---- Optional: play a real Spotify track instead of the built-in synthesized song. Fully additive - nothing
+// here runs until the 🎵 button is pressed, and if it fails (no Client ID, no Premium, DRM unsupported, network
+// blocked) the built-in songs above are untouched. Uses Authorization Code + PKCE, which needs no client secret
+// and so is safe to run entirely in this static page - no server changes. Spotify no longer gives new apps
+// access to beat/tempo analysis, so instead of guessing, a grown-up taps out the tempo after picking a song;
+// the note chart is generated from that tempo and the track's real length (duration_ms comes free from search,
+// no analysis API needed). See README for the one-time Spotify Developer Dashboard setup this requires. ----
+const SPOTIFY_REDIRECT = location.origin + location.pathname
+const SPOTIFY_SCOPES = 'streaming user-read-email user-read-private user-modify-playback-state'
+const spGet = (k) => localStorage.getItem('kmg_sp_' + k)
+const spSet = (k, v) => localStorage.setItem('kmg_sp_' + k, v)
+function b64url(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') }
+function randString(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a) }
+async function pkceChallenge(verifier) { return b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))) }
+
+async function spotifyLogin() {
+  const clientId = spGet('client_id'); if (!clientId) return spotifyPanelShow('setup')
+  const verifier = randString(64), state = randString(16)
+  spSet('verifier', verifier); spSet('state', state)
+  const challenge = await pkceChallenge(verifier)
+  const u = new URL('https://accounts.spotify.com/authorize')
+  u.search = new URLSearchParams({ client_id: clientId, response_type: 'code', redirect_uri: SPOTIFY_REDIRECT,
+    scope: SPOTIFY_SCOPES, code_challenge_method: 'S256', code_challenge: challenge, state }).toString()
+  location.href = u.toString()
+}
+async function spotifyHandleRedirect() { // runs once on load; no-op unless we just came back from the Spotify login page
+  const code = params.get('code'), state = params.get('state')
+  if (!code) return
+  history.replaceState(null, '', location.pathname + (score ? `?score=${score}` : '')) // scrub the one-time code before a reload could resend it
+  if (state !== spGet('state')) return
+  const clientId = spGet('client_id'), verifier = spGet('verifier')
+  try {
+    const body = new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: SPOTIFY_REDIRECT, client_id: clientId, code_verifier: verifier })
+    const r = await fetch('https://accounts.spotify.com/api/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body })
+    if (!r.ok) throw new Error('token exchange failed')
+    const tok = await r.json()
+    spSet('access_token', tok.access_token); spSet('refresh_token', tok.refresh_token); spSet('expires_at', Date.now() + tok.expires_in * 1000)
+    spotifyPanelShow('search')
+  } catch { spotifyPanelShow('login') }
+}
+async function spotifyToken() {
+  if (Date.now() < (+spGet('expires_at') || 0) - 30000) return spGet('access_token')
+  const refresh = spGet('refresh_token'), clientId = spGet('client_id')
+  if (!refresh || !clientId) return null
+  const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh, client_id: clientId })
+  const r = await fetch('https://accounts.spotify.com/api/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body })
+  if (!r.ok) return null
+  const tok = await r.json()
+  spSet('access_token', tok.access_token); spSet('expires_at', Date.now() + tok.expires_in * 1000)
+  if (tok.refresh_token) spSet('refresh_token', tok.refresh_token)
+  return tok.access_token
+}
+async function spotifySearch(q) {
+  const token = await spotifyToken(); if (!token) throw new Error('not logged in')
+  const r = await fetch(`https://api.spotify.com/v1/search?type=track&limit=8&q=${encodeURIComponent(q)}`, { headers: { Authorization: `Bearer ${token}` } })
+  if (!r.ok) throw new Error('search failed')
+  return (await r.json()).tracks.items
+}
+let spPlayer = null, spDeviceId = null
+function spotifyLoadSdk() {
+  return new Promise((resolve) => {
+    if (window.Spotify) return resolve()
+    window.onSpotifyWebPlaybackSDKReady = resolve
+    const s = document.createElement('script'); s.src = 'https://sdk.scdn.co/spotify-player.js'; document.head.appendChild(s)
+  })
+}
+async function spotifyEnsurePlayer() {
+  if (spPlayer && spDeviceId) return
+  await spotifyLoadSdk()
+  spPlayer = new Spotify.Player({ name: 'Kids Motion Game TV', getOAuthToken: (cb) => spotifyToken().then(cb), volume: 0.75 })
+  await new Promise((resolve, reject) => {
+    spPlayer.addListener('ready', ({ device_id }) => { spDeviceId = device_id; resolve() })
+    spPlayer.addListener('initialization_error', ({ message }) => reject(new Error(message)))
+    spPlayer.addListener('authentication_error', ({ message }) => reject(new Error(message)))
+    spPlayer.addListener('account_error', ({ message }) => reject(new Error('Spotify Premium is required: ' + message)))
+    spPlayer.connect()
+  })
+}
+async function spotifyPlayTrack(uri) {
+  await spotifyEnsurePlayer()
+  const token = await spotifyToken()
+  const r = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${spDeviceId}`, {
+    method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ uris: [uri] }) })
+  if (!r.ok && r.status !== 204) throw new Error('playback failed (Premium required)')
+}
+function startSpotifySong(track, bpm) {
+  mode = 'spotify'
+  const bars = altBars('L.R.L.R.', 'L.RBL.R.', Math.ceil(track.duration_ms / (60000 / bpm / 2 * 8) / 2) + 1)
+  const { notes } = notesFromBars(bpm, bars)
+  song = { name: track.name, bpm, notes, totalMs: track.duration_ms, theme: { bg: ['#1a1a2e', '#0f3460'] } }
+  combo = 0; bestCombo = 0; phase = 'countdown'; t0 = performance.now() + COUNTDOWN_MS
+  spotifyPlayTrack(track.uri).catch((e) => { console.warn('Spotify playback failed:', e); popText('Spotify play failed - check Premium login', W / 2, H * 0.5, '#ff8') })
+}
+
+// ---- Spotify setup panel: plain DOM (not canvas) so text input/search results are easy - see the CSS above. ----
+const spPanel = document.getElementById('spotifyPanel'), spPanelBody = document.getElementById('spotifyPanelBody')
+const spotifyPanelHide = () => { spPanel.style.display = 'none' }
+function spotifyPanelShow(state, data) {
+  spPanel.style.display = 'flex'
+  if (state === 'setup') spPanelBody.innerHTML = `
+    <h2>🎵 Connect Spotify</h2>
+    <p style="opacity:.8;line-height:1.5">Needs a free Spotify Developer app (one-time setup by a grown-up) and a Premium account for full songs - see the README.</p>
+    <input id="spClientId" placeholder="Paste your Spotify Client ID">
+    <div><button id="spSaveId">Save &amp; Connect</button><button id="spClose" class="ghost">Cancel</button></div>`
+  else if (state === 'login') spPanelBody.innerHTML = `
+    <h2>🎵 Connect Spotify</h2>
+    <p style="opacity:.8">Log in with your Spotify account (Premium needed for full songs).</p>
+    <div><button id="spLogin">Log in with Spotify</button><button id="spClose" class="ghost">Cancel</button></div>`
+  else if (state === 'search') spPanelBody.innerHTML = `
+    <h2>🎵 Pick a song</h2>
+    <div><input id="spQuery" placeholder="Search a song…"><button id="spSearchBtn">Search</button></div>
+    <div id="spResults" style="margin-top:10px;max-height:42vh;overflow:auto"></div>
+    <div><button id="spClose" class="ghost">Close</button></div>`
+  else if (state === 'tempo') spPanelBody.innerHTML = `
+    <h2>🥁 ${data.track.name}</h2>
+    <p style="opacity:.8;margin-top:-6px">${data.track.artists.map((a) => a.name).join(', ')}</p>
+    <p>Tap the button on the beat, at least 4 times, then hit Start!</p>
+    <button id="spTap" style="font:900 26px system-ui;padding:22px 38px;border-radius:50%">TAP</button>
+    <p id="spBpm" style="font:700 22px system-ui;color:#ffd23f">BPM: --</p>
+    <div><button id="spStart" disabled>Start! 🥁</button><button id="spClose" class="ghost">Cancel</button></div>`
+  document.getElementById('spClose').onclick = spotifyPanelHide
+  if (state === 'setup') document.getElementById('spSaveId').onclick = () => {
+    const id = document.getElementById('spClientId').value.trim(); if (id) { spSet('client_id', id); spotifyLogin() }
+  }
+  else if (state === 'login') document.getElementById('spLogin').onclick = spotifyLogin
+  else if (state === 'search') {
+    const results = document.getElementById('spResults')
+    const doSearch = async () => {
+      const q = document.getElementById('spQuery').value.trim(); if (!q) return
+      results.textContent = 'Searching…'
+      try {
+        const tracks = await spotifySearch(q)
+        results.innerHTML = tracks.map((t, i) => `<div class="spTrack" data-i="${i}">
+          <img src="${t.album.images[2]?.url || t.album.images[0]?.url || ''}" style="width:44px;height:44px;border-radius:6px">
+          <div><b>${t.name}</b><br><span style="opacity:.7">${t.artists.map((a) => a.name).join(', ')}</span></div></div>`).join('') || 'No results'
+        results.querySelectorAll('.spTrack').forEach((el) => el.onclick = () => spotifyPanelShow('tempo', { track: tracks[+el.dataset.i] }))
+      } catch { results.textContent = 'Could not search - are you logged in?' }
+    }
+    document.getElementById('spSearchBtn').onclick = doSearch
+    document.getElementById('spQuery').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch() })
+  } else if (state === 'tempo') {
+    const taps = [], startBtn = document.getElementById('spStart')
+    document.getElementById('spTap').onclick = () => {
+      taps.push(performance.now()); while (taps.length > 8) taps.shift()
+      if (taps.length < 2) return
+      const intervals = taps.slice(1).map((v, i) => v - taps[i])
+      const bpm = Math.max(40, Math.min(200, Math.round(60000 / (intervals.reduce((a, b) => a + b, 0) / intervals.length))))
+      document.getElementById('spBpm').textContent = `BPM: ${bpm}`
+      if (taps.length >= 4) { startBtn.disabled = false; startBtn.dataset.bpm = bpm }
+    }
+    startBtn.onclick = () => { const bpm = +startBtn.dataset.bpm; spotifyPanelHide(); startSpotifySong(data.track, bpm) }
+  }
+}
+document.getElementById('spotifyBtn').onclick = async () => {
+  unlock()
+  if (!spGet('client_id')) return spotifyPanelShow('setup')
+  spotifyPanelShow((await spotifyToken()) ? 'search' : 'login')
+}
 
 // ---- Render ----
 function drawBackground() {
@@ -208,7 +387,8 @@ function drawCelebrate() {
   ctx.textAlign = 'center'; ctx.fillStyle = '#fff'
   ctx.font = '900 76px system-ui'; ctx.fillText('🥁 Great drumming! 🥁', W / 2, H * 0.38)
   ctx.font = '700 42px system-ui'; ctx.fillText(`Score: ${score}   Best combo: ${bestCombo}`, W / 2, H * 0.38 + 70)
-  ctx.font = '500 26px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fillText('Next song coming up…', W / 2, H * 0.38 + 120)
+  ctx.font = '500 26px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.75)'
+  ctx.fillText(mode === 'spotify' ? 'Pick another song…' : 'Next song coming up…', W / 2, H * 0.38 + 120)
 }
 
 let lastFrame = performance.now()
@@ -218,9 +398,9 @@ function draw() {
   if (phase === 'countdown' && elapsed >= 0) phase = 'playing'
   ctx.clearRect(0, 0, W, H)
   drawBackground()
-  if (phase !== 'celebrate') {
+  if (phase !== 'celebrate' && phase !== 'idle') {
     for (const n of song.notes) {
-      if (!n.played && elapsed >= n.t) { drumHit(n.lane); n.played = true; pulse(n.lane, 0.5) }
+      if (!n.played && elapsed >= n.t) { if (mode === 'builtin') drumHit(n.lane); n.played = true; pulse(n.lane, 0.5) }
       if (!n.hit && !n.missed && elapsed > n.t + HIT_WINDOW_MS) n.missed = true
     }
     drumPulse[0] = Math.max(0, drumPulse[0] - dt * 2.2); drumPulse[1] = Math.max(0, drumPulse[1] - dt * 2.2)
@@ -237,10 +417,12 @@ function draw() {
   drawConfetti()
   if (phase === 'playing' && elapsed > song.totalMs + TAIL_MS) { phase = 'celebrate'; celebrateAt = now; songChime(); burstConfetti(200) }
   else if (phase === 'celebrate' && now - celebrateAt > CELEBRATE_MS) {
-    const next = (songIdx + 1) % SONGS.length, carry = next === 0 ? 0 : score
-    location.href = `taiko.html?song=${next + 1}&score=${carry}`
+    if (mode === 'spotify') { phase = 'idle'; spotifyPanelShow('search') } // no page reload in Spotify mode - keeps the login/token in memory
+    else { const next = (songIdx + 1) % SONGS.length, carry = next === 0 ? 0 : score; location.href = `taiko.html?song=${next + 1}&score=${carry}` }
   }
   requestAnimationFrame(draw)
 }
+startBuiltinSong((parseInt(params.get('song')) || 1) - 1)
+spotifyHandleRedirect()
 draw()
 </script>
