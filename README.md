@@ -6,6 +6,7 @@ Your phone's camera tracks your body → the server relays it → a TV-connected
 - **Trace** (arm-writing): capital letters (ABC), small letters (abc), numbers (123), Japanese **hiragana** (あ) and **katakana** (ア). Follow the numbered start dot and arrows, stroke by stroke, in the right order and direction. Practice a subset (vowels/consonants, or a kana row) and shuffle the order; each character shows a picture+word clue while you trace it.
 - **Jump Dodge**: jump over spikes.
 - **Alicorn Flight**: fly through a mountain landscape - bank/pitch with your arms (or keyboard) and flap to climb. Dodge freestanding boulders and thread bridge/hill gates cleanly for points; hitting one just bounces you gently, no fail state. 4 levels of increasing difficulty, each its own themed landscape (Green Valley → Red Canyon → Snowy Peaks → Dusk Peaks), auto-advancing on finish and carrying your score forward - loops back to Green Valley with a fresh score after Dusk Peaks. `?level=2` jumps straight to a level.
+- **Taiko Drums**: a Taiko-no-Tatsujin-style rhythm game - notes scroll down two lanes toward a ring; swing a hand down like a drumstick when a note arrives (left hand for the blue lane, right hand for the orange lane) to score and build a combo. The backing beat always plays in full, so it sounds like a real song even before you're good at it - no fail state. 4 songs of increasing tempo and density (Sunshine Beat → Bouncy Bus → Jungle Groove → Rocket Rhythm), auto-advancing on finish and carrying your score forward - loops back to Sunshine Beat with a fresh score after Rocket Rhythm. `?song=2` jumps straight to a song.
 - **1 or 2 players**: in Trace, two people (one on each side of the room) trace the same character together; it counts as done when both finish.
 
 ## What you need
@@ -44,13 +45,14 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 
 | What | How |
 |---|---|
-| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `Esc` menu, `P` 1/2 players |
+| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `8` Taiko Drums, `Esc` menu, `P` 1/2 players |
 | How much of each stroke is needed | `↑`/`↓` or `?threshold=0.7` |
 | How far your hand may stray from the line | `?brush=0.12` (bigger = more forgiving) |
 | Easier to start a stroke | `?startZone=3` (the glowing circle around the yellow dot; default 2.5), `?resumeZone=2.5` |
 | Prev / next character | `←` / `→` (or the ⏭ button) |
 | Arm reach (bigger = smaller movements) | `[` / `]` or `?reach=0.6` |
 | Jump: how high | `↑`/`↓` in Jump, or `?jumpThreshold=0.04`; speed `?jumpSpeed=0.25` |
+| Taiko Drums: jump to a song | `taiko.html?song=2`; no phone, use `F`/`J` keys or click the top/bottom half |
 | Session length | `?sessionMin=10` |
 | Hold-to-press time | `?dwellMs=1500` |
 | Start straight in a game | `?set=hiragana&players=2`, `?game=jump` |
