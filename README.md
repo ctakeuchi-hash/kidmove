@@ -6,6 +6,7 @@ Your phone's camera tracks your body → the server relays it → a TV-connected
 - **Trace** (arm-writing): capital letters (ABC), small letters (abc), numbers (123), Japanese **hiragana** (あ) and **katakana** (ア). Follow the numbered start dot and arrows, stroke by stroke, in the right order and direction. Practice a subset (vowels/consonants, or a kana row) and shuffle the order; each character shows a picture+word clue while you trace it.
 - **Jump Dodge**: jump over spikes.
 - **Alicorn Flight**: fly through a mountain landscape - bank/pitch with your arms (or keyboard) and flap to climb. Dodge freestanding boulders and thread bridge/hill gates cleanly for points; hitting one just bounces you gently, no fail state. 4 levels of increasing difficulty, each its own themed landscape (Green Valley → Red Canyon → Snowy Peaks → Dusk Peaks), auto-advancing on finish and carrying your score forward - loops back to Green Valley with a fresh score after Dusk Peaks. `?level=2` jumps straight to a level.
+- **Taiko Drums**: a Taiko-no-Tatsujin-style rhythm game - notes scroll down two lanes toward a ring; swing a hand down like a drumstick when a note arrives (left hand for the blue lane, right hand for the orange lane) to score and build a combo. The backing beat always plays in full, so it sounds like a real song even before you're good at it - no fail state. 4 songs of increasing tempo and density (Sunshine Beat → Bouncy Bus → Jungle Groove → Rocket Rhythm), auto-advancing on finish and carrying your score forward - loops back to Sunshine Beat with a fresh score after Rocket Rhythm. `?song=2` jumps straight to a song. The **🎵 Spotify** button swaps the synthesized beat for a real song of your choice (see [Spotify (optional)](#spotify-optional) below) - entirely optional, the built-in songs always work with no setup.
 - **Katamari**: roll a sticky ball around and pick up anything smaller than it to grow, just like the video game. Spin both hands forward (like cranking a wheel) to roll forward, spin them backward to back up; spin one hand faster than the other to turn, tank-style - so one hand alone still steers. No fail state: bumping something too big just bounces you off gently. Clearing an arena celebrates and starts a fresh, slightly bigger one.
 - **1 or 2 players**: in Trace, two people (one on each side of the room) trace the same character together; it counts as done when both finish.
 
@@ -45,13 +46,14 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 
 | What | How |
 |---|---|
-| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `8` Katamari, `Esc` menu, `P` 1/2 players |
+| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `8` Taiko Drums, `9` Katamari, `Esc` menu, `P` 1/2 players |
 | How much of each stroke is needed | `↑`/`↓` or `?threshold=0.7` |
 | How far your hand may stray from the line | `?brush=0.12` (bigger = more forgiving) |
 | Easier to start a stroke | `?startZone=3` (the glowing circle around the yellow dot; default 2.5), `?resumeZone=2.5` |
 | Prev / next character | `←` / `→` (or the ⏭ button) |
 | Arm reach (bigger = smaller movements) | `[` / `]` or `?reach=0.6` |
 | Jump: how high | `↑`/`↓` in Jump, or `?jumpThreshold=0.04`; speed `?jumpSpeed=0.25` |
+| Taiko Drums: jump to a song | `taiko.html?song=2`; no phone, use `F`/`J` keys or click the top/bottom half |
 | Session length | `?sessionMin=10` |
 | Hold-to-press time | `?dwellMs=1500` |
 | Start straight in a game | `?set=hiragana&players=2`, `?game=jump` |
@@ -60,6 +62,22 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 | Jumpy tracking | `?smooth=2` (steadier, a little more lag); `?smooth=0` turns smoothing off. On the phone page: `?model=full` (steadier pose model, a bit slower) |
 | Mute | `M` |
 | Test without a phone | `?mouse=1` (mouse = wrist), `Space` = fake jump |
+
+## Spotify (optional)
+
+Taiko Drums can play a real song you pick from Spotify instead of its built-in synthesized beat - press **🎵 Spotify** on the Taiko Drums screen. This is entirely optional and self-contained in the browser (no server changes, no secrets stored anywhere but that browser's local storage); the built-in songs work with zero setup either way.
+
+**Requirements:**
+- A **Spotify Premium** account (Spotify's playback SDK only streams full tracks for Premium; free accounts can't be used here).
+- The TV screen needs to be a **desktop/laptop browser** (Chrome, Edge, or Firefox) - most smart-TV built-in browsers don't support the DRM (Widevine) that Spotify's playback requires, and the login redirect below needs a stable URL that only really works when the browser doing the logging in is the one connected to the TV.
+
+**One-time setup (a grown-up does this once):**
+1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), log in, and create an app (any name/description).
+2. In the app's settings, add a **Redirect URI** that exactly matches the URL you'll use to open the Taiko Drums page - e.g. `https://localhost:3000/tv/taiko.html` if the browser is on the same computer running the server (most reliable), or `https://192.168.1.149:3000/tv/taiko.html` if you open it via the LAN URL the server printed (you'll need to update this if your computer's LAN IP ever changes).
+3. Copy the app's **Client ID** (no secret needed - the login uses PKCE, safe to run entirely in the browser).
+4. On the Taiko Drums page, press **🎵 Spotify**, paste the Client ID, and log in with your Spotify account.
+
+**Playing a song:** press 🎵 Spotify, search for a song, pick it from the results, then tap the **TAP** button on the beat at least 4 times (a normal tap-tempo, like DJ software) so the game knows the tempo - Spotify no longer shares precise beat timing with new apps, so this is how the note chart lines up with the song. Press **Start!** and it plays through the Web Playback SDK while notes scroll to match. After a song ends, pick another - your score keeps carrying forward.
 
 ## Environment variables
 `PORT` (default 3000) · `ANTHROPIC_API_KEY` · `KMG_MODEL` (default `claude-opus-5`; `claude-haiku-4-5` is faster/cheaper for voice) · `TOGETHER_API_KEY` · `IMAGE_PROVIDER` (`together`|`mock`) · `IMAGE_MODEL` · `IMAGE_PROMPT_TEMPLATE` (use `{theme}`) · `MOCK_DELAY_MS`
