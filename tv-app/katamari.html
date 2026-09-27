@@ -1,0 +1,292 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Katamari — Kids Motion Game</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0b1a;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+  #hint{position:fixed;top:8px;left:12px;margin:0;color:#9ad;font:14px system-ui;opacity:.85;max-width:70vw}
+  #score{position:fixed;top:8px;right:12px;margin:0;color:#ffd23f;font:800 24px system-ui;text-shadow:0 1px 5px #000;text-align:right}
+  #ver{position:fixed;left:12px;bottom:8px;color:#889;font:14px monospace}
+</style>
+<canvas id="c"></canvas>
+<pre id="hint">Spin BOTH hands forward (like cranking a wheel) to roll forward, spin them backward to back up. Spin one hand
+faster than the other to turn - just like a wheelchair or a tank. Roll into things smaller than you to pick them
+up and grow! (No phone connected? Arrows/WASD steer, Esc for menu, ` toggles the debug overlay.)</pre>
+<pre id="score">Score: 0</pre>
+<pre id="ver"></pre>
+<div id="banner" style="display:none;position:fixed;inset:0;align-items:center;justify-content:center;
+  flex-direction:column;color:#fff;font:800 56px system-ui;text-shadow:0 2px 12px #000;pointer-events:none;white-space:pre-line;text-align:center"></div>
+<pre id="debug" style="display:none;position:fixed;top:70px;right:12px;margin:0;color:#9f9;font:13px monospace;
+  background:#000a;padding:10px 14px;border-radius:8px;text-align:right;line-height:1.5"></pre>
+<script>
+fetch('/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => document.getElementById('ver').textContent = 'v' + v.version).catch(() => {})
+
+// ---- Config: same override-via-URL convention as tv-app/index.html and flight-test.html, e.g. ?spinGain=1.4 ----
+const CONFIG = {
+  spinDeadzone: 1.0,   // rad/s of wrist-around-shoulder rotation below this doesn't count as spinning (filters resting jitter)
+  spinSaturation: 9.0, // rad/s at/above this gives full speed for that hand; spinning faster doesn't add more
+  minArmOut: 0.28,     // wrist must be at least this many shoulder-widths from the shoulder, or its angle is too noisy to trust
+  turnGain: 2.6,       // rad/s of ball turning per unit of left/right spin difference
+  maxSpeed: 5.5,        // world units/s at full forward spin
+  growPerItem: 0.16,    // ball radius gained per item absorbed, scaled by the item's own size
+  absorbSlack: 1.05,    // an item this many times the ball's radius (or smaller) can still be absorbed
+  itemCount: 22,        // pickups scattered per arena
+  worldR: 34,           // arena radius, world units
+  ballR0: 1.2,          // starting ball radius
+}
+for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = +v
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d')
+let W, H
+const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight }
+addEventListener('resize', resize); resize()
+addEventListener('keydown', (e) => { if (e.key === 'Escape') location.href = 'index.html' })
+
+// ---- Audio: same synthesised-tone philosophy as tv-app/index.html - no sound files. ----
+let actx, muted = false
+const audioOn = () => actx && actx.state === 'running' && !muted
+function tone(f, t0 = 0, dur = 0.3, vol = 0.2, type = 'triangle') {
+  if (!audioOn()) return
+  const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + t0
+  o.type = type; o.frequency.value = f
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur)
+  o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur)
+}
+const NOTES = [523.25, 587.33, 659.25, 783.99, 880, 1046.5]
+const sfx = {
+  pop: (i) => tone(NOTES[i % 6], 0, 0.22, 0.16),
+  chime: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.12, 0.4, 0.22)),
+  bonk: () => { tone(220, 0, 0.18, 0.08, 'sine'); tone(196, 0.08, 0.2, 0.06, 'sine') },
+}
+const unlock = () => { actx ||= new AudioContext(); actx.resume() }
+addEventListener('pointerdown', unlock); addEventListener('keydown', unlock)
+addEventListener('keydown', (e) => { if (e.key === 'm' || e.key === 'M') muted = !muted })
+
+// ---- Confetti (same look as tv-app/index.html's celebrate()) ----
+const confetti = []
+function celebrate(n) {
+  for (let i = 0; i < n; i++) confetti.push({ x: W / 2, y: H / 2, vx: (Math.random() - .5) * 26, vy: -Math.random() * 22 - 4,
+    r: Math.random() * 6.28, vr: (Math.random() - .5) * .4, c: `hsl(${Math.random() * 360} 90% 60%)`, s: 8 + Math.random() * 10 })
+  sfx.chime()
+}
+function drawConfetti() {
+  for (const c of confetti) {
+    c.x += c.vx; c.y += c.vy; c.vy += 0.5; c.r += c.vr
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); ctx.fillStyle = c.c; ctx.fillRect(-c.s / 2, -c.s / 4, c.s, c.s / 2); ctx.restore()
+  }
+  while (confetti.length && confetti[0].y > H + 50) confetti.shift()
+}
+
+// ---- Input, part 1: keyboard fallback (works with no phone, same convention as flight-test.html) ----
+const keys = {}
+const KEY_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'a', 'A', 'd', 'D', 'w', 'W', 's', 'S']
+addEventListener('keydown', (e) => { if (KEY_KEYS.includes(e.key)) { keys[e.key] = true; e.preventDefault() } })
+addEventListener('keyup', (e) => { keys[e.key] = false })
+const held = (...ks) => ks.some((k) => keys[k])
+
+const debugEl = document.getElementById('debug')
+let debugVisible = false
+addEventListener('keydown', (e) => { if (e.key === '`') { debugVisible = !debugVisible; debugEl.style.display = debugVisible ? 'block' : 'none' } })
+
+// ---- Input, part 2: pose-driven hand spin. MediaPipe Pose gives body joints only (no fingers), so "spin" is
+// read as the wrist's angular velocity swinging around the shoulder - a kid winding an arm in a circle rotates
+// their wrist around that pivot whether the circle is big or small, so this needs no distance calibration at
+// all (unlike bank/pitch in flight-test.html, an angle is scale-invariant by itself). One tracker per hand:
+// left hand drives the left "wheel", right hand the right, tank-style - so cranking just one hand turns the
+// katamari, matching how a wheelchair or tank actually steers. ----
+const POSE_TIMEOUT_MS = 500
+const SPIN_SIGN = 1 // flip to -1 if forward/backward feels swapped once tested for real (same escape hatch as flight-test.html's BANK_SIGN)
+function makeSpinTracker() { return { prevAngle: null, vel: 0 } }
+const spinTrackers = { L: makeSpinTracker(), R: makeSpinTracker() }
+// Returns signed rad/s of the wrist circling the shoulder; decays toward 0 while the arm is tucked in (too close
+// to the shoulder for the angle to mean anything) so a still, relaxed arm never reads as spinning.
+function trackSpin(t, shoulder, wrist, shoulderW, dt) {
+  const dx = wrist[0] - shoulder[0], dy = wrist[1] - shoulder[1], r = Math.hypot(dx, dy)
+  if (shoulderW < 1e-3 || r < CONFIG.minArmOut * shoulderW) { t.prevAngle = null; t.vel *= 0.8; return t.vel }
+  const a = Math.atan2(dy, dx)
+  if (t.prevAngle !== null) {
+    let d = a - t.prevAngle
+    while (d > Math.PI) d -= 2 * Math.PI
+    while (d < -Math.PI) d += 2 * Math.PI
+    const inst = d / dt
+    t.vel = t.vel * 0.75 + inst * 0.25 // low-pass smoothing, same weight the trace game uses for its wrist filters' feel
+  }
+  t.prevAngle = a
+  return t.vel
+}
+function spinToUnit(vel) {
+  const mag = Math.max(0, Math.abs(vel) - CONFIG.spinDeadzone)
+  return Math.sign(vel) * Math.min(1, mag / (CONFIG.spinSaturation - CONFIG.spinDeadzone))
+}
+
+let lastPoseAt = -1e9, poseL = 0, poseR = 0
+// b = phone-app's full body keypoint array: [nose, Lsh, Rsh, Lel, Rel, Lwr, Rwr, Lhip, Rhip, Lknee, Rknee, Lankle, Rankle]
+let lastPoseT = 0
+function onPose(b) {
+  const [, lsh, rsh, , , lwr, rwr] = b
+  const now = performance.now(), dt = lastPoseT ? Math.min(0.2, Math.max(1 / 120, (now - lastPoseT) / 1000)) : 1 / 30
+  lastPoseT = now
+  const shoulderW = Math.hypot(rsh[0] - lsh[0], rsh[1] - lsh[1]) || 0.001
+  // Which physical hand ends up in the L vs R tracker depends on the camera's mirroring, but tank steering is
+  // symmetric so it doesn't matter which is which - only that each hand consistently drives the same side.
+  poseL = trackSpin(spinTrackers.L, lsh, lwr, shoulderW, dt)
+  poseR = trackSpin(spinTrackers.R, rsh, rwr, shoulderW, dt)
+  lastPoseAt = now
+}
+const poseLive = () => performance.now() - lastPoseAt < POSE_TIMEOUT_MS
+
+const ws = new WebSocket(`wss://${location.host}/?role=tv`)
+ws.onmessage = (e) => {
+  const m = JSON.parse(e.data)
+  if (m.type === 'kp') { const b = (m.ps?.[0] || m).b; if (b) onPose(b) }
+}
+
+// ---- Katamari state ----
+const ball = { x: 0, y: 0, heading: -Math.PI / 2, r: CONFIG.ballR0, rot: 0 }
+let score = 0, arenaGen = 0
+let items = []
+let banner = null // { text, until }
+function showBanner(text, ms) { banner = { text, until: performance.now() + ms }; document.getElementById('banner').style.display = 'flex' }
+
+const EMOJI_BY_SIZE = [ // [maxRadius, emoji list] - small stuff first, so early pickups are always within reach
+  [0.5, ['🌸', '🍪', '🍬', '⭐']],
+  [1.0, ['🍎', '🧦', '🎈', '🧸']],
+  [1.8, ['🐶', '⚽', '🎁', '🪀']],
+  [3.0, ['🚲', '🪑', '🌳', '⛲']],
+  [5.0, ['🚗', '🏠', '🐘', '🎪']],
+]
+function pickEmoji(r) { const tier = EMOJI_BY_SIZE.find(([max]) => r <= max) || EMOJI_BY_SIZE[EMOJI_BY_SIZE.length - 1]; return tier[1][Math.floor(Math.random() * tier[1].length)] }
+
+function newArena() {
+  arenaGen++
+  const R = CONFIG.worldR + arenaGen * 3 // each cleared arena is a little bigger - more room, not harder controls
+  items = []
+  for (let i = 0; i < CONFIG.itemCount + arenaGen * 2; i++) {
+    const ang = Math.random() * Math.PI * 2, dist = (0.15 + Math.random() * 0.85) * R
+    const r = 0.35 + Math.random() * (0.9 + arenaGen * 0.35) // later arenas skew toward bigger prizes
+    items.push({ x: Math.cos(ang) * dist, y: Math.sin(ang) * dist, r, emoji: pickEmoji(r), got: false })
+  }
+  ball.x = 0; ball.y = 0; ball.heading = -Math.PI / 2
+  CONFIG.worldR = R
+}
+newArena()
+
+function collectSize() { const alive = items.filter((it) => !it.got).length; return { alive, total: items.length } }
+
+let lastFrame = performance.now()
+function step(dt, now) {
+  const live = poseLive()
+  let l = live ? spinToUnit(poseL) : 0, r = live ? spinToUnit(poseR) : 0
+  if (!live) { // keyboard fallback: Up/W = both forward, Down/S = both backward, Left/Right = differential turn
+    if (held('ArrowUp', 'w', 'W')) { l += 1; r += 1 }
+    if (held('ArrowDown', 's', 'S')) { l -= 1; r -= 1 }
+    if (held('ArrowLeft', 'a', 'A')) { l -= 1; r += 1 }
+    if (held('ArrowRight', 'd', 'D')) { l += 1; r -= 1 }
+    l = Math.max(-1, Math.min(1, l)); r = Math.max(-1, Math.min(1, r))
+  }
+  const speed = SPIN_SIGN * (l + r) / 2 * CONFIG.maxSpeed
+  const turn = SPIN_SIGN * (r - l) * CONFIG.turnGain
+  ball.heading += turn * dt
+  ball.x += Math.cos(ball.heading) * speed * dt
+  ball.y += Math.sin(ball.heading) * speed * dt
+  ball.rot += speed / Math.max(0.3, ball.r) * dt // rolling animation: spins faster for a smaller ball, like a real wheel
+
+  // Arena boundary: a gentle, forgiving bounce - no fail state, same philosophy as flight-test.html's wall bounce.
+  const d = Math.hypot(ball.x, ball.y)
+  if (d > CONFIG.worldR - ball.r) {
+    const nx = ball.x / d, ny = ball.y / d
+    ball.x = nx * (CONFIG.worldR - ball.r); ball.y = ny * (CONFIG.worldR - ball.r)
+  }
+
+  for (const it of items) {
+    if (it.got) continue
+    const dist = Math.hypot(it.x - ball.x, it.y - ball.y)
+    if (dist > it.r + ball.r) continue
+    if (it.r <= ball.r * CONFIG.absorbSlack) {
+      it.got = true; score++
+      ball.r += CONFIG.growPerItem * it.r
+      sfx.pop(score); document.getElementById('score').textContent = `Score: ${score}   size ${ball.r.toFixed(1)}`
+      if (score % 8 === 0) celebrate(90)
+    } else { // too big to pick up yet: gently push the ball back out, no penalty
+      const nx = (ball.x - it.x) / (dist || 1), ny = (ball.y - it.y) / (dist || 1)
+      ball.x = it.x + nx * (it.r + ball.r); ball.y = it.y + ny * (it.r + ball.r)
+      if (Math.random() < 0.1) sfx.bonk()
+    }
+  }
+
+  const { alive } = collectSize()
+  if (alive === 0 && !banner) {
+    celebrate(220); sfx.chime()
+    showBanner(`★ Great rolling! ★\nScore: ${score}`, 3000)
+  }
+}
+
+// ---- Render: simple top-down camera centered on the ball, fixed north-up (easier for a young kid to read than
+// a rotating camera), same "flat colors, no image assets" look as the rest of tv-app. ----
+const SCALE = () => Math.min(W, H) / (CONFIG.worldR * 1.1)
+function worldToScreen(x, y) { const s = SCALE(); return { x: W / 2 + (x - ball.x) * s, y: H / 2 + (y - ball.y) * s } }
+
+function drawGround() {
+  ctx.fillStyle = '#1c2a4a'; ctx.fillRect(0, 0, W, H)
+  const s = SCALE(), grid = 4
+  ctx.strokeStyle = 'rgba(255,255,255,.06)'; ctx.lineWidth = 1
+  const originX = W / 2 - ((ball.x / grid) % 1) * grid * s, originY = H / 2 - ((ball.y / grid) % 1) * grid * s
+  for (let x = originX % (grid * s) - grid * s; x < W + grid * s; x += grid * s) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke() }
+  for (let y = originY % (grid * s) - grid * s; y < H + grid * s; y += grid * s) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke() }
+  const c = worldToScreen(0, 0)
+  ctx.strokeStyle = 'rgba(255,210,63,.5)'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(c.x, c.y, CONFIG.worldR * s, 0, 7); ctx.stroke()
+}
+function drawItems() {
+  const s = SCALE()
+  for (const it of items) {
+    if (it.got) continue
+    const p = worldToScreen(it.x, it.y), rr = Math.max(10, it.r * s)
+    ctx.font = `${rr * 2}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(it.emoji, p.x, p.y)
+  }
+}
+function drawBall(now) {
+  const s = SCALE(), r = Math.max(12, ball.r * s), cx = W / 2, cy = H / 2
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(ball.rot)
+  const g = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r)
+  g.addColorStop(0, 'hsl(280 70% 72%)'); g.addColorStop(1, 'hsl(280 70% 45%)')
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill()
+  ctx.strokeStyle = 'hsl(280 60% 30%)'; ctx.lineWidth = 4; ctx.stroke()
+  // stuck-on bits: a few faint marks that spin with the ball, so it visibly reads as "rolling" not sliding
+  ctx.fillStyle = 'rgba(255,255,255,.25)'
+  for (let i = 0; i < 6; i++) { const a = i / 6 * Math.PI * 2; ctx.beginPath(); ctx.arc(Math.cos(a) * r * 0.6, Math.sin(a) * r * 0.6, r * 0.12, 0, 7); ctx.fill() }
+  ctx.restore()
+  // face: always upright, looking the way the ball is heading (independent of the roll animation)
+  const fx = cx + Math.cos(ball.heading) * r * 0.35, fy = cy + Math.sin(ball.heading) * r * 0.35
+  for (const d of [-1, 1]) {
+    const ex = fx + Math.cos(ball.heading + Math.PI / 2) * d * r * 0.22, ey = fy + Math.sin(ball.heading + Math.PI / 2) * d * r * 0.22
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(ex, ey, r * 0.16, 0, 7); ctx.fill()
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(ex + Math.cos(ball.heading) * r * 0.06, ey + Math.sin(ball.heading) * r * 0.06, r * 0.08, 0, 7); ctx.fill()
+  }
+}
+function drawTracking(now) {
+  ctx.font = '600 30px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,.6)'
+  if (!poseLive() && now > 3000) ctx.fillText('No phone yet - arrows/WASD work, or hold both hands out and spin them like pedals', W / 2, H - 40)
+}
+function drawDebug() {
+  if (!debugVisible) return
+  debugEl.textContent = `left spin  ${poseL.toFixed(2)} rad/s -> ${spinToUnit(poseL).toFixed(2)}\n` +
+    `right spin ${poseR.toFixed(2)} rad/s -> ${spinToUnit(poseR).toFixed(2)}\n` +
+    `pose ${poseLive() ? 'live' : 'stale/none'}\nball r ${ball.r.toFixed(2)}  heading ${(ball.heading * 180 / Math.PI).toFixed(0)}°\n` +
+    `arena ${arenaGen}  items left ${collectSize().alive}/${collectSize().total}`
+}
+
+function draw() {
+  const now = performance.now()
+  const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now
+  if (banner) {
+    document.getElementById('banner').textContent = banner.text
+    if (now > banner.until) { banner = null; document.getElementById('banner').style.display = 'none'; newArena() }
+  } else step(dt, now)
+  ctx.clearRect(0, 0, W, H)
+  drawGround(); drawItems(); drawBall(now); drawTracking(now); drawConfetti(); drawDebug()
+  requestAnimationFrame(draw)
+}
+draw()
+</script>
