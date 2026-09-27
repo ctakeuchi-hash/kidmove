@@ -1,0 +1,435 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fruit Ninja — Kids Motion Game</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+  #hint{position:fixed;top:8px;left:12px;margin:0;color:#dfe;font:14px system-ui;opacity:.85;text-shadow:0 1px 4px #000;max-width:70vw}
+  #ver{position:fixed;left:12px;bottom:8px;color:#889;font:14px monospace}
+  #debug{display:none;position:fixed;top:8px;right:12px;margin:0;color:#9f9;font:13px monospace;
+    background:#000a;padding:10px 14px;border-radius:8px;text-align:right;line-height:1.5}
+</style>
+<pre id="hint">Swipe your hands through the fruit to slice it — both hands work! Watch out for bombs 💣
+Esc = menu · P = 1/2 players · ` = debug · no phone? drag the mouse</pre>
+<canvas id="c"></canvas>
+<pre id="debug"></pre>
+<div id="ver"></div>
+<script>
+fetch('/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => document.getElementById('ver').textContent = 'v' + v.version).catch(() => {})
+
+// ---- Levels: 4 dojos of increasing difficulty - faster/higher throws, shorter gaps between spawns, more
+// double/triple tosses, and more bombs, each with its own backdrop. `target` is the cumulative score (carried
+// across levels, see the level-complete handler in tick()) that finishes that level. ----
+const LEVELS = [
+  { name: 'Bamboo Dojo', target: 120, spawnMin: 950, spawnMax: 1550, speedMul: 1, bombChance: 0.03, doubleChance: 0.12, tripleChance: 0,
+    theme: { sky: ['#2a0d0d', '#5c1a1a', '#8a2f16', '#c9601f'], floor: '#3d2417', accent: 'bamboo' } },
+  { name: 'Jungle Ruins', target: 300, spawnMin: 800, spawnMax: 1300, speedMul: 1.12, bombChance: 0.08, doubleChance: 0.24, tripleChance: 0.04,
+    theme: { sky: ['#08210f', '#134a1f', '#1f7a34', '#bfe08a'], floor: '#2e2412', accent: 'jungle' } },
+  { name: 'Sunset Beach', target: 520, spawnMin: 680, spawnMax: 1120, speedMul: 1.26, bombChance: 0.13, doubleChance: 0.32, tripleChance: 0.09,
+    theme: { sky: ['#1a0f3a', '#5c2a6b', '#e0575f', '#ffb347'], floor: '#caa46a', accent: 'beach' } },
+  { name: 'Space Station', target: 800, spawnMin: 560, spawnMax: 960, speedMul: 1.42, bombChance: 0.19, doubleChance: 0.4, tripleChance: 0.16,
+    theme: { sky: ['#050014', '#0c0a2e', '#1a1a4a', '#3a2a6a'], floor: '#1a1a2e', accent: 'space' } },
+]
+const params = new URLSearchParams(location.search)
+const levelIdx = Math.max(0, Math.min(LEVELS.length - 1, (parseInt(params.get('level')) || 1) - 1))
+const level = LEVELS[levelIdx]
+let nPlayers = params.get('players') === '2' ? 2 : 1
+
+// ---- Fruit roster: each drawn procedurally (no image assets, matching the rest of tv-app) as a shaded disc
+// plus a couple of type-specific touches (stripes, spikes, seeds). rMul scales the base radius per type so a
+// watermelon reads bigger than a kiwi. score = base points; see sliceFruit() for the combo multiplier. ----
+const FRUITS = [
+  { id: 'watermelon', score: 10, rMul: 1.2, rind: '#1f7a34', rind2: '#0d5122', flesh: '#ff5f7a', seed: '#1a1a1a', stripes: true },
+  { id: 'apple', score: 10, rMul: 0.82, rind: '#e0304a', rind2: '#8f1c30', flesh: '#fff3d6', seed: '#7a4a1f', stem: true },
+  { id: 'orange', score: 10, rMul: 0.88, rind: '#ff9d2e', rind2: '#c96a12', flesh: '#ffb347', dimple: true },
+  { id: 'banana', score: 15, rMul: 0.9, rind: '#ffe135', rind2: '#caa400', flesh: '#fff7cf' },
+  { id: 'pineapple', score: 20, rMul: 1.05, rind: '#c68a1e', rind2: '#8a5a10', flesh: '#ffe98a', crown: true, cross: true },
+  { id: 'strawberry', score: 15, rMul: 0.72, rind: '#e8264a', rind2: '#a5102c', flesh: '#ff8fa3', seed: '#ffe27a', leaf: true },
+  { id: 'kiwi', score: 15, rMul: 0.78, rind: '#7a5a34', rind2: '#4a3620', flesh: '#a7d84a', seed: '#1a1a1a', fuzzy: true },
+  { id: 'peach', score: 10, rMul: 0.88, rind: '#ffb37a', rind2: '#e8792e', flesh: '#ffdca3', seed: '#7a4a1f' },
+]
+const GOLD = { id: 'gold', score: 75, rMul: 0.85, rind: '#ffd23f', rind2: '#c9941a', flesh: '#fff6c9', golden: true }
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d')
+let W, H, bgCanvas
+function buildBg() {
+  const c = document.createElement('canvas'); c.width = W; c.height = H
+  const g = c.getContext('2d'), t = level.theme
+  const grad = g.createLinearGradient(0, 0, 0, H)
+  t.sky.forEach((col, i) => grad.addColorStop(i / (t.sky.length - 1), col))
+  g.fillStyle = grad; g.fillRect(0, 0, W, H)
+  const floorH = H * 0.09
+  g.fillStyle = t.floor; g.fillRect(0, H - floorH, W, floorH)
+  g.fillStyle = 'rgba(0,0,0,.25)'; g.fillRect(0, H - floorH, W, 4)
+  if (t.accent === 'bamboo') {
+    for (const x of [0.04, 0.1, 0.9, 0.96]) {
+      g.fillStyle = 'rgba(10,20,10,.55)'
+      for (let y = -20; y < H - floorH; y += H * 0.09) g.fillRect(x * W - W * 0.012, y, W * 0.024, H * 0.09 - 6)
+    }
+  } else if (t.accent === 'jungle') {
+    for (const [x, y, r] of [[0.06, 0.02, 0.22], [0.94, 0.0, 0.26], [0.0, 0.18, 0.18], [1, 0.2, 0.2]]) {
+      g.fillStyle = 'rgba(4,20,8,.6)'; g.beginPath(); g.ellipse(x * W, y * H, r * W, r * 0.6 * W, 0, 0, 7); g.fill()
+    }
+  } else if (t.accent === 'beach') {
+    g.fillStyle = 'rgba(255,220,150,.8)'; g.beginPath(); g.arc(W * 0.5, H * 0.28, H * 0.11, 0, 7); g.fill()
+    g.fillStyle = 'rgba(20,20,50,.35)'; g.fillRect(0, H * 0.72, W, 3)
+    for (const x of [0.08, 0.92]) { g.fillStyle = 'rgba(20,30,10,.55)'; g.beginPath(); g.ellipse(x * W, H * 0.35, W * 0.05, H * 0.22, 0, 0, 7); g.fill() }
+  } else if (t.accent === 'space') {
+    g.fillStyle = '#fff'
+    for (let i = 0; i < 140; i++) { const x = Math.random() * W, y = Math.random() * (H - floorH); g.globalAlpha = Math.random() * 0.8 + 0.2; g.fillRect(x, y, 2, 2) }
+    g.globalAlpha = 1
+    g.fillStyle = 'rgba(180,140,255,.4)'; g.beginPath(); g.arc(W * 0.85, H * 0.18, H * 0.09, 0, 7); g.fill()
+  }
+  return c
+}
+function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; bgCanvas = buildBg() }
+
+// ---- State ----
+let score = Math.max(0, parseInt(params.get('score')) || 0)
+let lives = 3
+const LIVES_START = 3
+let fruits = [], particles = [], debris = [], fx = []
+let nextSpawnAt = performance.now() + 800
+let roundOverAt = null, overReason = null
+let levelCompleteAt = null
+let combo = { count: 0, until: 0 }
+let shakeUntil = 0
+const ROUND_OVER_MS = 2400, LEVEL_CELEBRATE_MS = 2800
+
+// ---- Blades: up to 4 (each player's left + right wrist). Raw camera-mirrored positions, deliberately NOT
+// smoothed (unlike the trace game's OneEuro filter) - a slicing game wants snappy response over precision. ----
+const BLADE_COLORS = ['#7cf5ff', '#3ad1e8', '#ff8fd8', '#ff5fb0']
+const BLADES = [0, 1, 2, 3].map((i) => ({ i, color: BLADE_COLORS[i], last: null, trail: [] }))
+let lastPoseAt = -1e9
+const poseLive = () => performance.now() - lastPoseAt < 500
+
+function segDist(x0, y0, x1, y1, px, py) {
+  const dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy
+  const t = len2 ? Math.max(0, Math.min(1, ((px - x0) * dx + (py - y0) * dy) / len2)) : 0
+  return Math.hypot(px - (x0 + t * dx), py - (y0 + t * dy))
+}
+function moveBlade(b, x, y) {
+  const now = performance.now()
+  if (b.last && now - b.last.t < 200 && Math.hypot(x - b.last.x, y - b.last.y) > 5) sliceSegment(b.last.x, b.last.y, x, y, now)
+  b.trail.push({ x, y, t: now }); while (b.trail.length && now - b.trail[0].t > 220) b.trail.shift()
+  b.last = { x, y, t: now }
+}
+function sliceSegment(x0, y0, x1, y1, now) {
+  const hitR = Math.max(10, H * 0.014)
+  for (const f of fruits.slice()) {
+    if (segDist(x0, y0, x1, y1, f.x, f.y) <= f.r + hitR) {
+      sliceFruit(f, Math.atan2(y1 - y0, x1 - x0), now)
+      if (f.kind === 'bomb') return
+    }
+  }
+}
+
+// ---- Spawning: fruits launch from just below the floor, arc up under gravity, and fall back - hang time is
+// resolution-independent (both vy0 and GRAVITY scale with H), so the feel is the same on any screen size. ----
+function spawnOne(x, now) {
+  const bomb = Math.random() < level.bombChance
+  const gold = !bomb && Math.random() < 0.05
+  const def = bomb ? null : gold ? GOLD : FRUITS[Math.floor(Math.random() * FRUITS.length)]
+  const r = (bomb ? 0.075 : 0.075 * def.rMul) * H
+  const vy = -(H * (1.5 + Math.random() * 0.4)) * level.speedMul
+  const vx = (0.5 - x / W) * H * 0.3 * level.speedMul + (Math.random() - 0.5) * H * 0.12
+  fruits.push({ kind: bomb ? 'bomb' : gold ? 'gold' : 'fruit', def, x, y: H + r, vx, vy, r, rot: Math.random() * 7, vrot: (Math.random() - 0.5) * 5, born: now })
+}
+function spawnWave(now) {
+  const roll = Math.random()
+  const n = roll < (level.tripleChance || 0) ? 3 : roll < level.doubleChance ? 2 : 1
+  for (let i = 0; i < n; i++) spawnOne(W * (0.15 + 0.7 * ((i + 0.5 + (Math.random() - 0.5) * 0.6) / n)), now)
+  nextSpawnAt = now + (level.spawnMin + Math.random() * (level.spawnMax - level.spawnMin)) / level.speedMul
+}
+
+// ---- Feedback: juice particles, flying halves, floating text - the "juicy" feel is mostly these three. ----
+function spawnJuice(x, y, color, big) {
+  const n = big ? 26 : 16
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, sp = H * (0.25 + Math.random() * 0.5)
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - H * 0.15, r: H * (big ? 0.012 : 0.008) * (0.6 + Math.random()), color, born: performance.now(), life: 500 + Math.random() * 300 })
+  }
+}
+function spawnHalves(f, ang) {
+  for (const side of [-1, 1]) {
+    debris.push({ f, side, ang, x: f.x, y: f.y, r: f.r,
+      vx: f.vx + Math.cos(ang + Math.PI / 2 * side) * H * 0.25, vy: f.vy - H * 0.15,
+      rot: f.rot, vrot: f.vrot + side * 2, born: performance.now() })
+  }
+}
+function popupAt(text, x, y, color = '#fff', size = 22) { fx.push({ text, x, y, vy: -H * 0.06, born: performance.now(), life: 900, color, size }) }
+function spawnExplosion(x, y) {
+  for (let i = 0; i < 44; i++) {
+    const a = Math.random() * Math.PI * 2, sp = H * (0.3 + Math.random() * 0.6)
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, r: H * (0.01 + Math.random() * 0.018),
+      color: ['#ff5a2e', '#ffb92e', '#2a2a2a', '#ff2e2e'][i % 4], born: performance.now(), life: 500 + Math.random() * 400 })
+  }
+}
+
+function sliceFruit(f, ang, now) {
+  const idx = fruits.indexOf(f); if (idx < 0) return
+  fruits.splice(idx, 1)
+  if (f.kind === 'bomb') { triggerBomb(f, now); return }
+  const def = f.kind === 'gold' ? GOLD : f.def
+  combo.count = now < combo.until ? combo.count + 1 : 1
+  combo.until = now + 550
+  const mult = combo.count >= 2 ? 1 + (combo.count - 1) * 0.5 : 1
+  const gained = Math.round(def.score * mult)
+  score += gained
+  spawnJuice(f.x, f.y, def.flesh, f.kind === 'gold')
+  spawnHalves(f, ang)
+  popupAt(`+${gained}`, f.x, f.y - f.r, '#fff', 24)
+  if (combo.count >= 2) { popupAt(`Combo x${combo.count}!`, W / 2, H * 0.2, '#ffd23f', 34); comboChime() }
+  f.kind === 'gold' ? sfx.gold() : sfx.splat()
+  sfx.slice()
+  checkLevelComplete(now)
+}
+// Guarded: fruit already in flight when the round ends can still land/get sliced for a frame or two - without
+// this guard each one would restart the ROUND_OVER_MS timer and could drive lives arbitrarily negative.
+function triggerBomb(f, now) {
+  if (roundOverAt) return
+  spawnExplosion(f.x, f.y)
+  sfx.bomb()
+  shakeUntil = now + 400
+  fruits.length = 0
+  roundOverAt = now; overReason = 'bomb'
+}
+function loseLife(now) {
+  if (roundOverAt) return
+  lives--
+  sfx.miss()
+  popupAt('Oops!', W / 2, H * 0.75, '#ffb0b0', 30)
+  if (lives <= 0) { roundOverAt = now; overReason = 'lives' }
+}
+function checkLevelComplete(now) {
+  if (!levelCompleteAt && score >= level.target) { levelCompleteAt = now; sfx.levelup(); spawnExplosion(W / 2, H * 0.3) }
+}
+
+// ---- Physics + lifecycle ----
+function update(dt, now) {
+  const GRAVITY = H * 1.85
+  if (!roundOverAt && !levelCompleteAt && now > nextSpawnAt) spawnWave(now)
+  const next = []
+  for (const f of fruits) {
+    f.vy += GRAVITY * dt; f.x += f.vx * dt; f.y += f.vy * dt; f.rot += f.vrot * dt
+    if (f.y > H + f.r * 2) { if (f.kind === 'fruit') loseLife(now); continue }
+    next.push(f)
+  }
+  fruits = next
+  debris = debris.filter((d) => { d.x += d.vx * dt; d.y += d.vy * dt; d.vy += GRAVITY * 0.6 * dt; d.rot += d.vrot * dt; return now - d.born < 1100 })
+  particles = particles.filter((p) => { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += H * 1.2 * dt; return now - p.born < p.life })
+  fx = fx.filter((p) => { p.y += p.vy * dt; return now - p.born < p.life })
+  if (roundOverAt && now - roundOverAt > ROUND_OVER_MS) { fruits = []; lives = LIVES_START; roundOverAt = null; overReason = null; nextSpawnAt = now + 700 }
+  if (levelCompleteAt && now - levelCompleteAt > LEVEL_CELEBRATE_MS) {
+    const isLast = levelIdx === LEVELS.length - 1
+    location.href = `fruit-ninja.html?level=${isLast ? 1 : levelIdx + 2}&score=${isLast ? 0 : score}&players=${nPlayers}`
+  }
+}
+
+// ---- Drawing ----
+function lighten(hex, amt) {
+  const n = parseInt(hex.slice(1), 16), r = Math.min(255, (n >> 16) + amt), g = Math.min(255, (n >> 8 & 255) + amt), b = Math.min(255, (n & 255) + amt)
+  return `rgb(${r},${g},${b})`
+}
+function drawWhole(g, def, x, y, r, rot) {
+  g.save(); g.translate(x, y); g.rotate(rot)
+  const grad = g.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.1, 0, 0, r)
+  grad.addColorStop(0, lighten(def.rind, 60)); grad.addColorStop(0.7, def.rind); grad.addColorStop(1, def.rind2)
+  g.beginPath(); g.arc(0, 0, r, 0, 7); g.fillStyle = grad; g.fill()
+  if (def.stripes) { g.strokeStyle = def.rind2; g.lineWidth = r * 0.14; for (const a of [-1, -0.4, 0.3, 0.9]) { g.beginPath(); g.ellipse(0, 0, r * 0.98, r * 0.35, a, 0, 7); g.stroke() } }
+  if (def.dimple) { g.fillStyle = def.rind2; for (let i = 0; i < 10; i++) { const a = Math.random() * 7, rr = Math.random() * r * 0.85; g.beginPath(); g.arc(Math.cos(a) * rr, Math.sin(a) * rr, r * 0.03, 0, 7); g.fill() } }
+  if (def.fuzzy) { g.fillStyle = 'rgba(255,255,255,.15)'; for (let i = 0; i < 40; i++) { const a = Math.random() * 7, rr = r * (0.7 + Math.random() * 0.3); g.beginPath(); g.arc(Math.cos(a) * rr, Math.sin(a) * rr, r * 0.02, 0, 7); g.fill() } }
+  if (def.cross) { g.strokeStyle = 'rgba(0,0,0,.2)'; g.lineWidth = r * 0.05; for (let i = -2; i <= 2; i++) { g.beginPath(); g.moveTo(-r, i * r * 0.35); g.lineTo(r, i * r * 0.35 + r * 0.6); g.stroke() } }
+  if (def.crown) { g.fillStyle = '#2f7a2f'; for (const a of [-0.5, -0.2, 0, 0.2, 0.5]) { g.beginPath(); g.moveTo(0, -r); g.lineTo(Math.sin(a) * r * 0.5, -r - r * 0.55); g.lineTo(Math.sin(a) * r * 0.9, -r * 0.75); g.fill() } }
+  if (def.leaf) { g.fillStyle = '#2f9a3f'; g.beginPath(); g.ellipse(-r * 0.3, -r * 0.9, r * 0.28, r * 0.16, -0.5, 0, 7); g.fill(); g.beginPath(); g.ellipse(r * 0.3, -r * 0.9, r * 0.28, r * 0.16, 0.5, 0, 7); g.fill() }
+  if (def.stem) { g.fillStyle = '#6a4a2a'; g.fillRect(-r * 0.04, -r * 1.05, r * 0.08, r * 0.3) }
+  if (def.golden) { const t = performance.now() / 300; for (let i = 0; i < 5; i++) { const a = t + i * (Math.PI * 2 / 5), rr = r * 1.25; g.fillStyle = 'rgba(255,230,120,.8)'; g.beginPath(); g.arc(Math.cos(a) * rr, Math.sin(a) * rr, r * 0.06, 0, 7); g.fill() } }
+  g.beginPath(); g.ellipse(-r * 0.35, -r * 0.4, r * 0.22, r * 0.13, -0.6, 0, 7); g.fillStyle = 'rgba(255,255,255,.4)'; g.fill()
+  g.restore()
+}
+function drawHalf(g, def, x, y, r, rot, ang, side) {
+  g.save(); g.translate(x, y); g.rotate(rot)
+  const a0 = ang - Math.PI / 2 * side, a1 = a0 + Math.PI
+  g.beginPath(); g.arc(0, 0, r, a0, a1); g.closePath()
+  const grad = g.createRadialGradient(0, 0, r * 0.1, 0, 0, r)
+  grad.addColorStop(0, lighten(def.flesh, 20)); grad.addColorStop(1, def.flesh)
+  g.fillStyle = grad; g.fill()
+  g.lineWidth = r * 0.14; g.strokeStyle = def.rind; g.stroke()
+  if (def.seed) { g.fillStyle = def.seed; for (let i = 0; i < 5; i++) { const a = a0 + Math.PI * (0.15 + i * 0.17), rr = r * 0.55; g.beginPath(); g.ellipse(Math.cos(a) * rr, Math.sin(a) * rr, r * 0.05, r * 0.03, a, 0, 7); g.fill() } }
+  g.restore()
+}
+function drawBomb(g, f) {
+  g.save(); g.translate(f.x, f.y); g.rotate(f.rot)
+  const r = f.r
+  const grad = g.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.1, 0, 0, r)
+  grad.addColorStop(0, '#4a4a4a'); grad.addColorStop(1, '#0a0a0a')
+  g.fillStyle = '#111'
+  for (let i = 0; i < 8; i++) { const a = i / 8 * 7; g.beginPath(); g.moveTo(Math.cos(a) * r, Math.sin(a) * r); g.lineTo(Math.cos(a) * r * 1.28, Math.sin(a) * r * 1.28); g.lineWidth = r * 0.12; g.strokeStyle = '#111'; g.stroke() }
+  g.beginPath(); g.arc(0, 0, r, 0, 7); g.fillStyle = grad; g.fill()
+  const flicker = 0.7 + Math.sin(performance.now() / 60) * 0.3
+  g.fillStyle = '#5a3a1a'; g.beginPath(); g.moveTo(0, -r); g.quadraticCurveTo(r * 0.3, -r * 1.3, r * 0.15, -r * 1.5); g.lineWidth = r * 0.1; g.strokeStyle = '#5a3a1a'; g.stroke()
+  g.fillStyle = `rgba(255,${140 + flicker * 60},40,${flicker})`; g.beginPath(); g.arc(r * 0.15, -r * 1.55, r * 0.16 * flicker, 0, 7); g.fill()
+  g.fillStyle = '#fff'; for (const d of [-1, 1]) { g.beginPath(); g.ellipse(d * r * 0.32, -r * 0.05, r * 0.16, r * 0.2, 0, 0, 7); g.fill() }
+  g.fillStyle = '#111'; for (const d of [-1, 1]) { g.beginPath(); g.arc(d * r * 0.32, -r * 0.05, r * 0.08, 0, 7); g.fill() }
+  g.strokeStyle = '#111'; g.lineWidth = r * 0.06; g.beginPath(); g.arc(0, r * 0.25, r * 0.18, Math.PI * 1.15, Math.PI * 1.85); g.stroke()
+  g.restore()
+}
+
+function drawHUD(now) {
+  ctx.textAlign = 'left'; ctx.font = '700 34px system-ui'; ctx.fillStyle = '#fff'
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 8
+  ctx.fillText(`Score ${score}`, 24, 50)
+  ctx.font = '30px system-ui'
+  ctx.fillText('❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, LIVES_START - lives)), 24, 88)
+  ctx.textAlign = 'right'
+  ctx.font = '700 28px system-ui'; ctx.fillText(`Level ${levelIdx + 1}: ${level.name}`, W - 24, 44)
+  const barW = W * 0.26, barX = W - 24 - barW
+  ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.fillRect(barX, 56, barW, 12)
+  ctx.fillStyle = '#ffd23f'; ctx.fillRect(barX, 56, barW * Math.min(1, score / level.target), 12)
+  ctx.textAlign = 'left'; ctx.font = '22px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.8)'
+  ctx.fillText(nPlayers === 2 ? '2 Players' : '1 Player', 24, H - 24)
+  ctx.shadowBlur = 0
+}
+function drawBanner() {
+  if (levelCompleteAt) {
+    const isLast = levelIdx === LEVELS.length - 1
+    ctx.textAlign = 'center'; ctx.font = '900 68px system-ui'; ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 16
+    ctx.fillText(`🎉 ${level.name} complete! 🎉`, W / 2, H * 0.42)
+    ctx.font = '700 40px system-ui'; ctx.fillText(`Score ${score}`, W / 2, H * 0.5)
+    ctx.font = '600 30px system-ui'; ctx.fillText(isLast ? 'Back to Bamboo Dojo!' : `On to ${LEVELS[levelIdx + 1].name}!`, W / 2, H * 0.57)
+    ctx.shadowBlur = 0
+  } else if (roundOverAt) {
+    ctx.textAlign = 'center'; ctx.font = '900 72px system-ui'; ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 16
+    ctx.fillText(overReason === 'bomb' ? '💥 BOOM!' : '🍉 Oh no!', W / 2, H * 0.42)
+    ctx.font = '700 36px system-ui'; ctx.fillText(`Score ${score} - try again!`, W / 2, H * 0.5)
+    ctx.shadowBlur = 0
+  }
+}
+
+let lastFrame = performance.now()
+function draw(now) {
+  const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now
+  update(dt, now)
+  ctx.save()
+  if (now < shakeUntil) ctx.translate((Math.random() - 0.5) * 18, (Math.random() - 0.5) * 18)
+  ctx.clearRect(-20, -20, W + 40, H + 40)
+  ctx.drawImage(bgCanvas, 0, 0)
+  for (const d of debris) {
+    const age = (now - d.born) / 1100
+    ctx.globalAlpha = age > 0.7 ? 1 - (age - 0.7) / 0.3 : 1
+    drawHalf(ctx, d.f.kind === 'gold' ? GOLD : d.f.def, d.x, d.y, d.r, d.rot, d.ang, d.side)
+  }
+  ctx.globalAlpha = 1
+  for (const f of fruits) f.kind === 'bomb' ? drawBomb(ctx, f) : drawWhole(ctx, f.kind === 'gold' ? GOLD : f.def, f.x, f.y, f.r, f.rot)
+  for (const p of particles) {
+    const age = (now - p.born) / p.life
+    ctx.globalAlpha = Math.max(0, 1 - age); ctx.fillStyle = p.color
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (1 - age * 0.4), 0, 7); ctx.fill()
+  }
+  ctx.globalAlpha = 1
+  for (const b of BLADES) {
+    const pts = b.trail.filter((p) => now - p.t < 220); if (pts.length < 2) continue
+    ctx.lineCap = 'round'; ctx.shadowBlur = 24; ctx.shadowColor = b.color
+    for (let i = 1; i < pts.length; i++) {
+      ctx.globalAlpha = (1 - (now - pts[i].t) / 220) * 0.9
+      ctx.strokeStyle = b.color; ctx.lineWidth = Math.max(2, 14 * (i / pts.length))
+      ctx.beginPath(); ctx.moveTo(pts[i - 1].x, pts[i - 1].y); ctx.lineTo(pts[i].x, pts[i].y); ctx.stroke()
+    }
+    ctx.globalAlpha = 1; ctx.shadowBlur = 0
+  }
+  for (const p of fx) {
+    const age = (now - p.born) / p.life
+    ctx.globalAlpha = Math.max(0, 1 - age); ctx.textAlign = 'center'; ctx.font = `800 ${p.size}px system-ui`; ctx.fillStyle = p.color
+    ctx.fillText(p.text, p.x, p.y)
+  }
+  ctx.globalAlpha = 1
+  drawHUD(now)
+  drawBanner()
+  ctx.restore()
+  updateDebug(now)
+  requestAnimationFrame(draw)
+}
+
+// ---- Audio: synthesised, no files - a tone synth plus a filtered noise burst for whoosh/explosion. ----
+let actx, muted = false
+const audioOn = () => actx && actx.state === 'running' && !muted
+function tone(f, t0 = 0, dur = 0.25, vol = 0.2, type = 'triangle') {
+  if (!audioOn()) return
+  const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + t0
+  o.type = type; o.frequency.value = f
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur)
+  o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur)
+}
+function noiseBurst(dur = 0.15, vol = 0.3) {
+  if (!audioOn()) return
+  const buf = actx.createBuffer(1, actx.sampleRate * dur, actx.sampleRate), d = buf.getChannelData(0)
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length)
+  const src = actx.createBufferSource(); src.buffer = buf
+  const g = actx.createGain(); g.gain.value = vol
+  src.connect(g).connect(actx.destination); src.start()
+}
+const COMBO_NOTES = [523.25, 659.25, 784, 987.77, 1174.66]
+const sfx = {
+  slice: () => noiseBurst(0.07, 0.16),
+  splat: () => tone([392, 440, 494, 523][Math.floor(Math.random() * 4)], 0, 0.15, 0.12, 'sine'),
+  gold: () => { tone(1046.5, 0, 0.15, 0.16); tone(1568, 0.08, 0.2, 0.13) },
+  miss: () => tone(180, 0, 0.28, 0.1, 'sine'),
+  bomb: () => { noiseBurst(0.45, 0.55); tone(70, 0, 0.55, 0.3, 'sawtooth') },
+  levelup: () => [523, 659, 784, 1047, 1318].forEach((f, i) => tone(f, i * 0.1, 0.4, 0.2)),
+}
+const comboChime = () => tone(COMBO_NOTES[Math.min(4, combo.count - 2)], 0, 0.3, 0.22)
+const unlock = () => { actx ||= new AudioContext(); actx.resume() }
+addEventListener('pointerdown', unlock); addEventListener('keydown', unlock); addEventListener('touchstart', unlock)
+
+// ---- Input: pose over WebSocket (mirrors the main app's protocol), mouse/touch fallback for testing. ----
+function onKp(m) {
+  const now = performance.now(); lastPoseAt = now
+  const list = (m.ps || [{ b: m.b }]).filter((p) => p.b)
+  if (!list.length) return
+  const scr = list.map((p) => ({ p, x: 1 - (p.b[1][0] + p.b[2][0]) / 2 }))
+  let slots
+  if (nPlayers === 1) slots = [{ p: scr.sort((a, b) => Math.abs(a.x - 0.5) - Math.abs(b.x - 0.5))[0].p, i: 0 }]
+  else if (scr.length >= 2) { scr.sort((a, b) => a.x - b.x); slots = [{ p: scr[0].p, i: 0 }, { p: scr[1].p, i: 1 }] }
+  else slots = [{ p: scr[0].p, i: scr[0].x < 0.5 ? 0 : 1 }]
+  for (const { p, i } of slots) {
+    const b = p.b
+    moveBlade(BLADES[i * 2], (1 - b[5][0]) * W, b[5][1] * H)
+    moveBlade(BLADES[i * 2 + 1], (1 - b[6][0]) * W, b[6][1] * H)
+  }
+}
+addEventListener('mousemove', (e) => { if (!poseLive()) moveBlade(BLADES[0], e.clientX, e.clientY) })
+addEventListener('touchmove', (e) => { if (!poseLive()) for (const t of e.touches) moveBlade(BLADES[t.identifier % 4], t.clientX, t.clientY) }, { passive: true })
+
+const sendConfig = () => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'config', players: nPlayers })) }
+const ws = new WebSocket(`wss://${location.host}/?role=tv`)
+ws.onopen = () => { sendConfig(); setInterval(sendConfig, 2000) }
+ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type === 'kp') onKp(m) }
+
+// ---- Debug overlay + keys ----
+const debugEl = document.getElementById('debug')
+let debugVisible = false
+addEventListener('keydown', (e) => {
+  if (e.key === '`') { debugVisible = !debugVisible; debugEl.style.display = debugVisible ? 'block' : 'none' }
+  else if (e.key === 'Escape') location.href = 'index.html'
+  else if (e.key === 'p' || e.key === 'P') { nPlayers = nPlayers === 1 ? 2 : 1; sendConfig() }
+  else if (e.key === 'm' || e.key === 'M') muted = !muted
+})
+function updateDebug(now) {
+  if (!debugVisible) return
+  debugEl.textContent = `pose: ${poseLive() ? 'LIVE' : 'no signal (mouse/touch)'}\n` +
+    `players: ${nPlayers}   fruits: ${fruits.length}   particles: ${particles.length}\n` +
+    `score: ${score} / ${level.target}   lives: ${lives}   combo: ${combo.count}\n` +
+    `level: ${levelIdx + 1} ${level.name}`
+}
+
+window.DEBUG = {
+  get fruits() { return fruits }, get score() { return score }, get lives() { return lives },
+  get level() { return level }, levelIdx, LEVELS, BLADES, onKp, moveBlade,
+  get roundOverAt() { return roundOverAt }, get levelCompleteAt() { return levelCompleteAt },
+}
+
+addEventListener('resize', resize)
+resize()
+requestAnimationFrame(draw)
+</script>

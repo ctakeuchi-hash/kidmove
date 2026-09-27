@@ -20,7 +20,7 @@
 <script>
 // ---- Config: override any of these via URL, e.g. /tv/?set=hiragana&players=2&threshold=0.7&mouse=1 ----
 // Start straight into a game with ?game=jump or ?set=upper|lower|digits|hiragana|katakana (no param = menu).
-// Keys: 1-5 pick a character set, 6 Jump Dodge, 7 Alicorn Flight, 8 Taiko Drums, P = 1/2 players, Esc = menu, ←/→ = prev/next character, ↑/↓ = how much of a stroke is needed
+// Keys: 1-5 pick a character set, 6 Jump Dodge, 7 Alicorn Flight, 8 Taiko Drums, 9 Fruit Ninja, P = 1/2 players, Esc = menu, ←/→ = prev/next character, ↑/↓ = how much of a stroke is needed
 // (Jump: jump size), [ ] = arm reach, M = mute, Space = fake jump (testing), Enter = new session after the break scene.
 const CONFIG = {
   threshold: 0.85,  // fraction of each stroke you must trace to complete it
@@ -428,7 +428,7 @@ document.getElementById('btnSkip').onclick = () => loadChar(idx + 1)
 document.getElementById('snd').onclick = () => { if (actx && actx.state === 'running') { muted = !muted; syncBar() } }
 
 // ---- Menu scene: big buttons, pressed by clicking, by holding your hand on one, or from the phone ----
-const MENU_SETS = ['trace', 'jump', 'flight', 'taiko'] // the 4 games; picking 'trace' leads to the sets screen to choose a character set
+const MENU_SETS = ['trace', 'jump', 'flight', 'taiko', 'ninja'] // the 5 games; picking 'trace' leads to the sets screen to choose a character set
 let dwell = null, mouseXY = null
 function menuRects() {
   const n = MENU_SETS.length, gx = W * 0.03, chh = H * 0.3
@@ -445,6 +445,7 @@ function pressMenu(r) {
   if (r.id === 'jump') { startGame('jump'); return }
   if (r.id === 'flight') { location.href = 'flight-test.html'; return }
   if (r.id === 'taiko') { location.href = 'taiko.html'; return }
+  if (r.id === 'ninja') { location.href = 'fruit-ninja.html'; return }
   pickSet() // 'trace' leads to the sets screen to choose upper/lower/digits/hiragana/katakana
 }
 function menuPointers(now) { // hands (fresh poses) and the mouse
@@ -552,9 +553,12 @@ function drawMenu(now, dt) {
     ctx.fillStyle = '#fff'
     if (r.n) { ctx.font = '700 34px system-ui'; ctx.textBaseline = 'middle'; ctx.fillText(r.n === 1 ? '1 Player' : '2 Players', r.x + r.w / 2, r.y + r.h / 2 + 2) }
     else {
-      const label = { trace: ['✏️', 'Letters & Numbers'], jump: ['🦘', 'Jump Dodge'], flight: ['🦄', 'Alicorn Flight'], taiko: ['🥁', 'Taiko Drums'] }[r.id]
+      const label = { trace: ['✏️', 'Letters & Numbers'], jump: ['🦘', 'Jump Dodge'], flight: ['🦄', 'Alicorn Flight'], taiko: ['🥁', 'Taiko Drums'], ninja: ['🍉', 'Fruit Ninja'] }[r.id]
       ctx.font = `800 ${r.h * 0.28}px system-ui`; ctx.fillText(label[0], r.x + r.w / 2, r.y + r.h * 0.4)
-      ctx.font = '600 30px system-ui'; ctx.fillText(label[1], r.x + r.w / 2, r.y + r.h * 0.58)
+      let sz = 30 // shrink the label to fit narrower tiles once there are enough games that a fixed size overflows
+      ctx.font = `600 ${sz}px system-ui`
+      while (sz > 14 && ctx.measureText(label[1]).width > r.w * 0.9) { sz--; ctx.font = `600 ${sz}px system-ui` }
+      ctx.fillText(label[1], r.x + r.w / 2, r.y + r.h * 0.58)
     }
     if (on && dwell) { ctx.fillStyle = '#ffd23f'; ctx.fillRect(r.x + 20, r.y + r.h - 14, (r.w - 40) * Math.min(1, dwell.ms / CONFIG.dwellMs), 8) } // hold-to-press bar
     ctx.textBaseline = 'alphabetic'; ctx.restore()
@@ -722,7 +726,7 @@ function drawJump(now) {
 
 // ---- Keyboard ----
 addEventListener('keydown', (e) => {
-  const num = '12345678'.indexOf(e.key)
+  const num = '123456789'.indexOf(e.key)
   if (e.key === 'Enter' && sessionOver) startSession()
   else if (e.key === 'Escape') showMenu()
   else if (e.key === 'm' || e.key === 'M') { muted = !muted; syncBar() }
@@ -730,6 +734,7 @@ addEventListener('keydown', (e) => {
   else if (e.key === '[' || e.key === ']') CONFIG.reach = Math.max(0.2, CONFIG.reach + (e.key === ']' ? 0.05 : -0.05))
   else if (num === 6) location.href = 'flight-test.html'
   else if (num === 7) location.href = 'taiko.html'
+  else if (num === 8) location.href = 'fruit-ninja.html'
   else if (num >= 0) { if (num !== 5) CONFIG.group = 'all'; startGame(num === 5 ? 'jump' : 'trace', CHAR_SETS[num]) }
   else if (e.key === ' ') jump.fakeAt = performance.now()
   else if (scene === 'play' && mode === 'jump') {

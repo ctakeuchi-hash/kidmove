@@ -7,7 +7,8 @@ Your phone's camera tracks your body → the server relays it → a TV-connected
 - **Jump Dodge**: jump over spikes.
 - **Alicorn Flight**: fly through a mountain landscape - bank/pitch with your arms (or keyboard) and flap to climb. Dodge freestanding boulders and thread bridge/hill gates cleanly for points; hitting one just bounces you gently, no fail state. 4 levels of increasing difficulty, each its own themed landscape (Green Valley → Red Canyon → Snowy Peaks → Dusk Peaks), auto-advancing on finish and carrying your score forward - loops back to Green Valley with a fresh score after Dusk Peaks. `?level=2` jumps straight to a level.
 - **Taiko Drums**: a Taiko-no-Tatsujin-style rhythm game - notes scroll down two lanes toward a ring; swing a hand down like a drumstick when a note arrives (left hand for the blue lane, right hand for the orange lane) to score and build a combo. The backing beat always plays in full, so it sounds like a real song even before you're good at it - no fail state. 4 songs of increasing tempo and density (Sunshine Beat → Bouncy Bus → Jungle Groove → Rocket Rhythm), auto-advancing on finish and carrying your score forward - loops back to Sunshine Beat with a fresh score after Rocket Rhythm. `?song=2` jumps straight to a song. The **🎵 Spotify** button swaps the synthesized beat for a real song of your choice (see [Spotify (optional)](#spotify-optional) below) - entirely optional, the built-in songs always work with no setup.
-- **1 or 2 players**: in Trace, two people (one on each side of the room) trace the same character together; it counts as done when both finish.
+- **Fruit Ninja**: swipe your hands (both work as blades - real double-fisted slicing) through fruit tossed up from the bottom of the screen; watermelon, pineapple, strawberry, kiwi and more, each drawn and juiced up in its own colors. Chain slices for combo bonuses, watch for the rare golden fruit, and dodge the bombs (slicing one ends the round, but you're straight back in after a quick "BOOM!"). Missing 3 fruit also ends the round. 4 dojos of increasing difficulty (Bamboo Dojo → Jungle Ruins → Sunset Beach → Space Station), auto-advancing once you hit that dojo's score target and carrying your score forward. In 2-player mode both people's hands slice the same fruit together. `?level=2` jumps straight to a level.
+- **1 or 2 players**: in Trace, two people (one on each side of the room) trace the same character together; it counts as done when both finish. Fruit Ninja supports 2 players too, sharing the same fruit between both; Alicorn Flight and Taiko Drums are 1 player only.
 
 ## What you need
 - A computer to run the server (Node 20+), a phone, and a TV-connected browser (laptop/HDMI, smart-TV browser, etc.). All on the **same Wi-Fi**.
@@ -45,7 +46,8 @@ The server prints two URLs, e.g. `https://192.168.1.149:3000/phone` and `.../tv`
 
 | What | How |
 |---|---|
-| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `8` Taiko Drums, `Esc` menu, `P` 1/2 players |
+| Pick a set / game | `1`-`5` sets, `6` Jump, `7` Alicorn Flight, `8` Taiko Drums, `9` Fruit Ninja, `Esc` menu, `P` 1/2 players |
+| Fruit Ninja: jump to a level / players | `fruit-ninja.html?level=2&players=2` (also `` ` `` for a tracking debug overlay); no phone? drag the mouse to slice |
 | How much of each stroke is needed | `↑`/`↓` or `?threshold=0.7` |
 | How far your hand may stray from the line | `?brush=0.12` (bigger = more forgiving) |
 | Easier to start a stroke | `?startZone=3` (the glowing circle around the yellow dot; default 2.5), `?resumeZone=2.5` |
