@@ -1,0 +1,436 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dino Stomp — Kids Motion Game</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0b1a;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+  #hint{position:fixed;top:8px;left:12px;margin:0;color:#dfe;font:14px system-ui;opacity:.85;max-width:70vw;text-shadow:0 1px 4px #000}
+  #score{position:fixed;top:8px;right:12px;margin:0;color:#ffd23f;font:800 24px system-ui;text-shadow:0 1px 5px #000;text-align:right}
+  #ver{position:fixed;left:12px;bottom:8px;color:#889;font:14px monospace}
+  #banner{position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;
+    color:#fff;font:800 52px system-ui;text-shadow:0 2px 14px #000;pointer-events:none;white-space:pre-line;text-align:center}
+  #debug{display:none;position:fixed;top:70px;right:12px;margin:0;color:#9f9;font:13px monospace;
+    background:#000a;padding:10px 14px;border-radius:8px;text-align:right;line-height:1.5}
+</style>
+<pre id="hint">You're a dinosaur! Walk around (your body moves you) to stomp over bugs and plants. Raise BOTH arms up and hold
+for a big ROAR - it gobbles up nearby prey and smashes falling rocks. Watch the warning shadow and step away from
+falling rocks when you're not roaring. (No phone? Arrows/WASD move, Space roars, Esc for menu, ` debug overlay.)</pre>
+<canvas id="c"></canvas>
+<pre id="score">Score: 0</pre>
+<div id="ver"></div>
+<div id="banner"></div>
+<pre id="debug"></pre>
+<script>
+fetch('/version', { cache: 'no-store' }).then((r) => r.json()).then((v) => document.getElementById('ver').textContent = 'v' + v.version).catch(() => {})
+
+// ---- Levels: 4 prehistoric eras of increasing difficulty - more/faster prey, more frequent falling rocks -
+// each its own backdrop. `target` is the cumulative score (carried across levels, see the level-complete
+// handler in tick()) that finishes that era. Same convention as Alicorn Flight / Fruit Ninja / Taiko Drums. ----
+const LEVELS = [
+  { name: 'Swampy Lowlands', target: 100, preyMax: 5, preySpeed: 0.1, rockMin: 3200, rockMax: 4600, rockR: 0.055,
+    theme: { sky: ['#1a3a2e', '#2f5c3f', '#5a8f5a', '#bfe0a0'], ground: ['#2f4a2a', '#3f6038'], accent: 'swamp' } },
+  { name: 'Fern Jungle', target: 260, preyMax: 7, preySpeed: 0.14, rockMin: 2600, rockMax: 3800, rockR: 0.06,
+    theme: { sky: ['#07210f', '#114a1f', '#1f7a34', '#9fd86a'], ground: ['#1f3a1a', '#2c4f24'], accent: 'jungle' } },
+  { name: 'Volcanic Badlands', target: 460, preyMax: 8, preySpeed: 0.18, rockMin: 1900, rockMax: 2900, rockR: 0.07,
+    theme: { sky: ['#2a0d0d', '#5c1a1a', '#a3401a', '#ffb04a'], ground: ['#3a2418', '#4e3220'], accent: 'volcano' } },
+  { name: 'Ice Age Tundra', target: 700, preyMax: 9, preySpeed: 0.22, rockMin: 1500, rockMax: 2300, rockR: 0.075,
+    theme: { sky: ['#0a1a3a', '#1c3a5c', '#5a8fbf', '#eaf6ff'], ground: ['#cfe0ec', '#aac4d8'], accent: 'ice' } },
+]
+const params = new URLSearchParams(location.search)
+const levelIdx = Math.max(0, Math.min(LEVELS.length - 1, (parseInt(params.get('level')) || 1) - 1))
+const level = LEVELS[levelIdx]
+
+// ---- Config: same override-via-URL convention as the rest of tv-app, e.g. ?roarMargin=0.1 ----
+const CONFIG = {
+  roarMargin: 0.08,  // normalized-y wrists must clear above the shoulders by this much to count as "arms up"
+  roarHoldMs: 150,   // how long arms must stay up before a roar fires (filters a quick arm swing)
+  roarDurMs: 700,    // how long the roar's gobble/smash radius stays active
+  roarCooldownMs: 1700,
+  roarRadius: 0.22,  // fraction of screen width
+  follow: 6,         // how fast the dino chases your tracked hip position (higher = snappier, more lag-free)
+}
+for (const [k, v] of new URLSearchParams(location.search)) if (k in CONFIG) CONFIG[k] = +v
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d')
+let W, H, bgCanvas
+function buildBg() {
+  const c = document.createElement('canvas'); c.width = W; c.height = H
+  const g = c.getContext('2d'), t = level.theme
+  const grad = g.createLinearGradient(0, 0, 0, H)
+  t.sky.forEach((col, i) => grad.addColorStop(i / (t.sky.length - 1), col))
+  g.fillStyle = grad; g.fillRect(0, 0, W, H)
+  const groundY = H * 0.86
+  const gGrad = g.createLinearGradient(0, groundY, 0, H)
+  gGrad.addColorStop(0, t.ground[0]); gGrad.addColorStop(1, t.ground[1])
+  g.fillStyle = gGrad; g.fillRect(0, groundY, W, H - groundY)
+  g.fillStyle = 'rgba(0,0,0,.25)'; g.fillRect(0, groundY, W, 4)
+  if (t.accent === 'swamp') {
+    for (let i = 0; i < 10; i++) { const x = (i + 0.5) / 10 * W + Math.sin(i) * 20, h = H * (0.08 + Math.random() * 0.1)
+      g.fillStyle = 'rgba(10,30,15,.5)'; g.fillRect(x - 3, groundY - h, 6, h) }
+  } else if (t.accent === 'jungle') {
+    for (const [x, y, r] of [[0.05, 0.0, 0.24], [0.95, -0.02, 0.28], [0.28, -0.05, 0.16]]) {
+      g.fillStyle = 'rgba(4,20,8,.55)'; g.beginPath(); g.ellipse(x * W, y * H, r * W, r * 0.55 * W, 0, 0, 7); g.fill()
+    }
+  } else if (t.accent === 'volcano') {
+    g.fillStyle = 'rgba(30,15,10,.75)'; g.beginPath()
+    g.moveTo(W * 0.62, groundY); g.lineTo(W * 0.76, H * 0.22); g.lineTo(W * 0.9, groundY); g.closePath(); g.fill()
+    g.fillStyle = 'rgba(255,120,40,.85)'; g.beginPath(); g.arc(W * 0.76, H * 0.22, 10, 0, 7); g.fill()
+  } else if (t.accent === 'ice') {
+    for (let i = 0; i < 6; i++) { const x = (i + 0.5) / 6 * W, h = H * (0.1 + (i % 3) * 0.05)
+      g.fillStyle = 'rgba(200,225,240,.7)'; g.beginPath(); g.moveTo(x - 16, groundY); g.lineTo(x, groundY - h); g.lineTo(x + 16, groundY); g.fill() }
+  }
+  return c
+}
+function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; bgCanvas = buildBg() }
+
+// ---- Audio: synthesised, no files - same philosophy as the rest of tv-app. ----
+let actx, muted = false
+const audioOn = () => actx && actx.state === 'running' && !muted
+function tone(f, t0 = 0, dur = 0.3, vol = 0.2, type = 'triangle') {
+  if (!audioOn()) return
+  const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + t0
+  o.type = type; o.frequency.value = f
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur)
+  o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur)
+}
+function noiseBurst(dur = 0.2, vol = 0.3) {
+  if (!audioOn()) return
+  const buf = actx.createBuffer(1, actx.sampleRate * dur, actx.sampleRate), d = buf.getChannelData(0)
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length)
+  const src = actx.createBufferSource(); src.buffer = buf
+  const g = actx.createGain(); g.gain.value = vol
+  src.connect(g).connect(actx.destination); src.start()
+}
+const NOTES = [523.25, 587.33, 659.25, 783.99, 880, 1046.5]
+const sfx = {
+  chomp: (i) => tone(NOTES[i % 6], 0, 0.18, 0.15),
+  roar: () => { // a layered low growl: two detuned low tones with a pitch dip, plus a noise bed
+    noiseBurst(0.5, 0.18)
+    const t = actx && actx.currentTime
+    if (!audioOn()) return
+    for (const [f, det] of [[90, 0], [96, 0.02]]) {
+      const o = actx.createOscillator(), g = actx.createGain()
+      o.type = 'sawtooth'; o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * 0.6, t + 0.6)
+      g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.22, t + 0.08); g.gain.exponentialRampToValueAtTime(0.001, t + 0.7)
+      o.detune.value = det * 1200
+      o.connect(g).connect(actx.destination); o.start(t); o.stop(t + 0.7)
+    }
+  },
+  smash: () => { noiseBurst(0.25, 0.3); tone(140, 0, 0.3, 0.2, 'square') },
+  hurt: () => { tone(180, 0, 0.28, 0.12, 'sine'); tone(150, 0.1, 0.3, 0.1, 'sine') },
+  chime: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.12, 0.4, 0.22)),
+  levelup: () => [523, 659, 784, 1047, 1318].forEach((f, i) => tone(f, i * 0.1, 0.4, 0.2)),
+}
+const unlock = () => { actx ||= new AudioContext(); actx.resume() }
+addEventListener('pointerdown', unlock); addEventListener('keydown', unlock)
+addEventListener('keydown', (e) => { if (e.key === 'm' || e.key === 'M') muted = !muted })
+
+// ---- Confetti (same look as tv-app/index.html's celebrate(), reused by katamari.html/fruit-ninja.html too) ----
+const confetti = []
+function celebrate(n) {
+  for (let i = 0; i < n; i++) confetti.push({ x: W / 2, y: H / 2, vx: (Math.random() - .5) * 26, vy: -Math.random() * 22 - 4,
+    r: Math.random() * 6.28, vr: (Math.random() - .5) * .4, c: `hsl(${Math.random() * 360} 90% 60%)`, s: 8 + Math.random() * 10 })
+}
+function drawConfetti() {
+  for (const c of confetti) {
+    c.x += c.vx; c.y += c.vy; c.vy += 0.5; c.r += c.vr
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); ctx.fillStyle = c.c; ctx.fillRect(-c.s / 2, -c.s / 4, c.s, c.s / 2); ctx.restore()
+  }
+  while (confetti.length && confetti[0].y > H + 50) confetti.shift()
+}
+
+// ---- State ----
+let score = Math.max(0, parseInt(params.get('score')) || 0)
+let lives = 3
+const LIVES_START = 3
+const Y_MIN_FRAC = 0.38, Y_MAX_FRAC = 0.86 // the dino stays in this vertical "ground" band - near the camera at the bottom, far at the top
+const dino = { x: 0, y: 0, targetX: 0, targetY: 0, facing: 1, sizeMul: 1, roarUntil: 0, roarCooldownUntil: 0, hitUntil: 0 }
+let prey = [], rocks = []
+let nextPreyAt = 0, nextRockAt = 0
+let roundOverAt = null, levelCompleteAt = null
+const ROUND_OVER_MS = 2200, LEVEL_CELEBRATE_MS = 2800
+const MAX_SIZE_MUL = 1.6
+
+function resetDino() {
+  dino.x = dino.targetX = W / 2; dino.y = dino.targetY = H * (Y_MIN_FRAC + Y_MAX_FRAC) / 2; dino.sizeMul = 1
+}
+
+// ---- Prey + rocks ----
+const PREY_KINDS = [
+  { emoji: '🐛', score: 10, r: 0.022 }, { emoji: '🦗', score: 10, r: 0.022 }, { emoji: '🐸', score: 15, r: 0.026 },
+  { emoji: '🦎', score: 15, r: 0.026 }, { emoji: '🌿', score: 8, r: 0.02 }, { emoji: '🍄', score: 8, r: 0.02 },
+]
+function depthScale(y) { return 0.7 + 0.6 * (y / H - Y_MIN_FRAC) / (Y_MAX_FRAC - Y_MIN_FRAC) }
+function spawnPrey(now) {
+  if (prey.length >= level.preyMax) { nextPreyAt = now + 300; return }
+  const kind = PREY_KINDS[Math.floor(Math.random() * PREY_KINDS.length)]
+  const y = H * (Y_MIN_FRAC + Math.random() * (Y_MAX_FRAC - Y_MIN_FRAC))
+  const edge = Math.random() < 0.5
+  const x = edge ? (Math.random() < 0.5 ? -30 : W + 30) : Math.random() * W
+  prey.push({ kind, x, y, vx: (Math.random() - 0.5) * level.preySpeed * H, vy: (Math.random() - 0.5) * level.preySpeed * H * 0.4, born: now, wiggle: Math.random() * 7 })
+  nextPreyAt = now + 400 + Math.random() * 500
+}
+function spawnRock(now) {
+  const x = W * (0.1 + Math.random() * 0.8), y = H * (Y_MIN_FRAC + Math.random() * (Y_MAX_FRAC - Y_MIN_FRAC))
+  rocks.push({ x, y, r: level.rockR * H, warnUntil: now + 900, landed: false, hitUntil: 0 })
+  nextRockAt = now + level.rockMin + Math.random() * (level.rockMax - level.rockMin)
+}
+
+function eatPrey(p, now) {
+  const idx = prey.indexOf(p); if (idx < 0) return
+  prey.splice(idx, 1)
+  score += p.kind.score
+  dino.sizeMul = Math.min(MAX_SIZE_MUL, dino.sizeMul + 0.02)
+  sfx.chomp(Math.floor(score / 10))
+  spawnPop(p.x, p.y, '+' + p.kind.score)
+  if (score % 60 < p.kind.score) celebrate(16)
+  checkLevelComplete(now)
+}
+function smashRock(r, now) {
+  const idx = rocks.indexOf(r); if (idx < 0) return
+  rocks.splice(idx, 1)
+  score += 15
+  sfx.smash()
+  spawnPop(r.x, r.y, '+15')
+  for (let i = 0; i < 14; i++) particles.push({ x: r.x, y: r.y, vx: (Math.random() - 0.5) * H * 0.5, vy: (Math.random() - 0.8) * H * 0.5, r: H * 0.01, color: '#8a7a6a', born: now, life: 500 })
+  checkLevelComplete(now)
+}
+function hitByRock(now) {
+  if (roundOverAt || now < dino.hitUntil) return
+  lives--; dino.hitUntil = now + 1000
+  sfx.hurt(); spawnPop(dino.x, dino.y - H * 0.05, 'Ow!')
+  if (lives <= 0) { roundOverAt = now }
+}
+function checkLevelComplete(now) {
+  if (!levelCompleteAt && score >= level.target) { levelCompleteAt = now; sfx.levelup(); celebrate(140) }
+}
+
+const fx = [] // floating "+N" / "Ow!" popups
+function spawnPop(x, y, text) { fx.push({ x, y, vy: -H * 0.05, text, born: performance.now(), life: 900 }) }
+const particles = []
+
+// ---- Roar: both wrists held above shoulders briefly triggers a radial gobble/smash pulse. ----
+let armsUpSince = 0
+function tryRoar(now) {
+  if (now < dino.roarCooldownUntil || roundOverAt || levelCompleteAt) return
+  dino.roarUntil = now + CONFIG.roarDurMs
+  dino.roarCooldownUntil = now + CONFIG.roarCooldownMs
+  sfx.roar()
+  const R = CONFIG.roarRadius * W
+  for (const p of prey.slice()) if (Math.hypot(p.x - dino.x, p.y - dino.y) <= R) eatPrey(p, now)
+  for (const r of rocks.slice()) if (Math.hypot(r.x - dino.x, r.y - dino.y) <= R) smashRock(r, now)
+}
+
+// ---- Input: pose over WebSocket (same protocol as the rest of tv-app), keyboard fallback for testing. ----
+let lastPoseAt = -1e9
+const poseLive = () => performance.now() - lastPoseAt < 500
+function onPose(b) {
+  const [, lsh, rsh, , , lwr, rwr, lhip, rhip] = b
+  const now = performance.now(); lastPoseAt = now
+  const hipX = (lhip[0] + rhip[0]) / 2, hipY = (lhip[1] + rhip[1]) / 2
+  dino.targetX = (1 - hipX) * W
+  dino.targetY = H * (Y_MIN_FRAC + Math.max(0, Math.min(1, hipY)) * (Y_MAX_FRAC - Y_MIN_FRAC))
+  const shY = (lsh[1] + rsh[1]) / 2
+  if (lwr[1] < shY - CONFIG.roarMargin && rwr[1] < shY - CONFIG.roarMargin) {
+    if (!armsUpSince) armsUpSince = now
+    else if (now - armsUpSince > CONFIG.roarHoldMs) tryRoar(now)
+  } else armsUpSince = 0
+}
+const keys = {}
+const KEY_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'a', 'A', 'd', 'D', 'w', 'W', 's', 'S', ' ']
+addEventListener('keydown', (e) => { if (KEY_KEYS.includes(e.key)) { keys[e.key] = true; e.preventDefault() }; if (e.key === ' ') tryRoar(performance.now()) })
+addEventListener('keyup', (e) => { keys[e.key] = false })
+const held = (...ks) => ks.some((k) => keys[k])
+
+const ws = new WebSocket(`wss://${location.host}/?role=tv`)
+ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type === 'kp') { const b = (m.ps?.[0] || m).b; if (b) onPose(b) } }
+
+// ---- Physics + lifecycle ----
+function update(dt, now) {
+  if (!roundOverAt && !levelCompleteAt) {
+    if (poseLive()) {
+      const k = Math.min(1, CONFIG.follow * dt)
+      dino.x += (dino.targetX - dino.x) * k
+      dino.y += (dino.targetY - dino.y) * k
+    } else {
+      const spd = W * 0.55
+      if (held('ArrowLeft', 'a', 'A')) dino.x -= spd * dt
+      if (held('ArrowRight', 'd', 'D')) dino.x += spd * dt
+      if (held('ArrowUp', 'w', 'W')) dino.y -= spd * dt
+      if (held('ArrowDown', 's', 'S')) dino.y += spd * dt
+    }
+    dino.x = Math.max(W * 0.04, Math.min(W * 0.96, dino.x))
+    dino.y = Math.max(H * Y_MIN_FRAC, Math.min(H * Y_MAX_FRAC, dino.y))
+    if (Math.abs(dino.targetX - dino.x) > 2) dino.facing = dino.targetX > dino.x ? 1 : -1
+
+    if (now > nextPreyAt) spawnPrey(now)
+    if (now > nextRockAt) spawnRock(now)
+
+    for (const p of prey) {
+      p.x += p.vx * dt; p.y += p.vy * dt
+      if (p.x < -40 || p.x > W + 40 || p.y < H * Y_MIN_FRAC - 20 || p.y > H * Y_MAX_FRAC + 20) { p.vx *= -1; p.vy *= -1 }
+      const rr = H * p.kind.r * depthScale(p.y) + H * 0.045 * dino.sizeMul * depthScale(dino.y)
+      if (Math.hypot(p.x - dino.x, p.y - dino.y) < rr) eatPrey(p, now)
+    }
+    for (const r of rocks.slice()) {
+      if (now < r.warnUntil) continue
+      if (!r.landed) {
+        r.landed = true
+        const rr = r.r * 0.9 + H * 0.05 * dino.sizeMul * depthScale(dino.y)
+        if (Math.hypot(r.x - dino.x, r.y - dino.y) < rr && now > dino.roarUntil) hitByRock(now)
+        r.hitUntil = now + 600
+      } else if (now > r.hitUntil) { const idx = rocks.indexOf(r); if (idx >= 0) rocks.splice(idx, 1) }
+    }
+  }
+  particles.forEach((p) => { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += H * 1.2 * dt })
+  for (let i = particles.length - 1; i >= 0; i--) if (now - particles[i].born > particles[i].life) particles.splice(i, 1)
+  for (let i = fx.length - 1; i >= 0; i--) { fx[i].y += fx[i].vy * dt; if (now - fx[i].born > fx[i].life) fx.splice(i, 1) }
+
+  if (roundOverAt && now - roundOverAt > ROUND_OVER_MS) { lives = LIVES_START; roundOverAt = null; prey = []; rocks = []; nextPreyAt = now + 500; nextRockAt = now + 1200 }
+  if (levelCompleteAt && now - levelCompleteAt > LEVEL_CELEBRATE_MS) {
+    const isLast = levelIdx === LEVELS.length - 1
+    location.href = `dino.html?level=${isLast ? 1 : levelIdx + 2}&score=${isLast ? 0 : score}`
+  }
+}
+
+// ---- Drawing: a procedurally-built, friendly green T-Rex (boxy flat-color shapes, same style as the bear
+// avatar and Katamari's ball) - stays the same character across eras, only the backdrop changes, matching
+// Alicorn Flight's "one creature, four landscapes" convention. ----
+function drawDino(now) {
+  const s = H * 0.16 * depthScale(dino.y) * dino.sizeMul
+  const roaring = now < dino.roarUntil, hurt = now < dino.hitUntil && Math.floor(now / 100) % 2
+  if (hurt) return
+  ctx.save()
+  ctx.translate(dino.x, dino.y); ctx.scale(dino.facing, 1)
+  if (roaring) { const pulse = 1 + Math.sin(now / 40) * 0.04; ctx.scale(pulse, pulse) }
+  const BODY = '#4a9a4a', BODY2 = '#3a7a3a', BELLY = '#cfe8a0', OUT = '#1f3a1f'
+  ctx.lineJoin = 'round'
+  const bob = Math.sin(now / 220) * s * 0.04
+  // tail
+  ctx.beginPath(); ctx.moveTo(-s * 0.35, -s * 0.1 + bob); ctx.quadraticCurveTo(-s * 0.95, s * 0.05 + bob, -s * 1.25, s * 0.35 + bob)
+  ctx.lineWidth = s * 0.22; ctx.strokeStyle = OUT; ctx.stroke(); ctx.lineWidth = s * 0.16; ctx.strokeStyle = BODY2; ctx.stroke()
+  // legs
+  for (const dx of [-0.12, 0.14]) {
+    ctx.beginPath(); ctx.moveTo(dx * s, s * 0.1 + bob); ctx.lineTo(dx * s + s * 0.04, s * 0.55)
+    ctx.lineWidth = s * 0.22; ctx.strokeStyle = OUT; ctx.stroke(); ctx.lineWidth = s * 0.16; ctx.strokeStyle = BODY2; ctx.stroke()
+  }
+  // body
+  ctx.beginPath(); ctx.ellipse(0, bob, s * 0.42, s * 0.3, -0.15, 0, 7)
+  ctx.fillStyle = OUT; ctx.save(); ctx.scale(1.06, 1.06); ctx.fill(); ctx.restore()
+  ctx.fillStyle = BODY; ctx.fill()
+  ctx.beginPath(); ctx.ellipse(s * 0.05, s * 0.1 + bob, s * 0.28, s * 0.16, -0.1, 0, 7); ctx.fillStyle = BELLY; ctx.fill()
+  // arms (tiny!)
+  for (const dy of [-0.06, 0.1]) {
+    ctx.beginPath(); ctx.moveTo(s * 0.2, dy * s + bob); ctx.lineTo(s * 0.32, dy * s + s * 0.1 + bob)
+    ctx.lineWidth = s * 0.07; ctx.strokeStyle = OUT; ctx.lineCap = 'round'; ctx.stroke()
+    ctx.lineWidth = s * 0.05; ctx.strokeStyle = BODY2; ctx.stroke()
+  }
+  // neck + head
+  const headX = s * 0.5, headY = -s * 0.28 + bob, mouth = roaring ? 0.55 : 0.18
+  ctx.beginPath(); ctx.moveTo(s * 0.25, bob); ctx.lineTo(headX - s * 0.1, headY + s * 0.1)
+  ctx.lineWidth = s * 0.26; ctx.strokeStyle = OUT; ctx.stroke(); ctx.lineWidth = s * 0.19; ctx.strokeStyle = BODY; ctx.stroke()
+  ctx.save(); ctx.translate(headX, headY)
+  ctx.beginPath(); ctx.moveTo(-s * 0.1, -s * 0.14); ctx.lineTo(s * 0.32, -s * 0.1); ctx.lineTo(s * 0.3, mouth * s * 0.3)
+  ctx.lineTo(-s * 0.1, s * 0.16); ctx.closePath()
+  ctx.fillStyle = OUT; ctx.save(); ctx.scale(1.1, 1.1); ctx.fill(); ctx.restore(); ctx.fillStyle = BODY; ctx.fill()
+  // mouth
+  ctx.beginPath(); ctx.moveTo(s * 0.02, s * 0.02); ctx.lineTo(s * 0.3, mouth * s * 0.3 + s * 0.02)
+  ctx.lineWidth = s * 0.03; ctx.strokeStyle = roaring ? '#7a1a1a' : OUT; ctx.stroke()
+  if (roaring) { ctx.fillStyle = '#7a1a1a'; ctx.beginPath(); ctx.moveTo(s * 0.02, s * 0.02); ctx.lineTo(s * 0.3, mouth * s * 0.3 + s * 0.02); ctx.lineTo(s * 0.26, mouth * s * 0.55); ctx.lineTo(s * 0.0, s * 0.1); ctx.fill() }
+  // teeth
+  ctx.fillStyle = '#fff'
+  for (let i = 0; i < 3; i++) { const tx = s * 0.08 + i * s * 0.07; ctx.beginPath(); ctx.moveTo(tx, s * 0.02); ctx.lineTo(tx + s * 0.03, s * 0.02); ctx.lineTo(tx + s * 0.015, s * 0.06); ctx.fill() }
+  // eye
+  ctx.beginPath(); ctx.ellipse(s * 0.06, -s * 0.06, s * 0.055, s * 0.055, 0, 0, 7); ctx.fillStyle = '#fff'; ctx.fill()
+  ctx.beginPath(); ctx.ellipse(s * 0.08, -s * 0.06, s * 0.028, s * 0.028, 0, 0, 7); ctx.fillStyle = '#111'; ctx.fill()
+  ctx.restore()
+  if (roaring) {
+    ctx.strokeStyle = `rgba(255,220,150,${0.5 - ((now % 260) / 260) * 0.5})`; ctx.lineWidth = 6
+    ctx.beginPath(); ctx.arc(0, 0, CONFIG.roarRadius * W * ((now % 260) / 260), 0, 7); ctx.stroke()
+  }
+  ctx.restore()
+}
+function drawOnePrey(p, now) {
+  const sc = depthScale(p.y), r = H * p.kind.r * sc
+  ctx.font = `${r * 2.6}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  const wob = Math.sin(now / 160 + p.wiggle) * 3
+  ctx.fillText(p.kind.emoji, p.x, p.y + wob)
+}
+function drawRocks(now) {
+  for (const r of rocks) {
+    if (now < r.warnUntil) {
+      const t = 1 - (r.warnUntil - now) / 900
+      ctx.beginPath(); ctx.ellipse(r.x, r.y, r.r * (0.5 + t * 0.5), r.r * 0.3 * (0.5 + t * 0.5), 0, 0, 7)
+      ctx.fillStyle = `rgba(255,80,40,${0.2 + t * 0.3})`; ctx.fill()
+      continue
+    }
+    const sh = r.landed && now < r.hitUntil
+    ctx.beginPath(); ctx.ellipse(r.x, r.y + r.r * 0.6, r.r * 0.8, r.r * 0.25, 0, 0, 7); ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.fill()
+    const g = ctx.createRadialGradient(r.x - r.r * 0.3, r.y - r.r * 0.3, r.r * 0.1, r.x, r.y, r.r)
+    g.addColorStop(0, sh ? '#ff8a4a' : '#8a7a6a'); g.addColorStop(1, sh ? '#a0401a' : '#4a3a2e')
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, 7); ctx.fillStyle = g; ctx.fill()
+  }
+}
+function drawHUD() {
+  ctx.textAlign = 'left'; ctx.font = '700 28px system-ui'; ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 8
+  // bottom-left, not top-left: the top-left corner is taken by the hint text (see #hint)
+  ctx.fillText('🥚'.repeat(Math.max(0, lives)) + '🥀'.repeat(Math.max(0, LIVES_START - lives)), 24, H - 24)
+  ctx.textAlign = 'right'
+  ctx.font = '700 26px system-ui'; ctx.fillText(`Level ${levelIdx + 1}: ${level.name}`, W - 24, 38)
+  const barW = W * 0.26, barX = W - 24 - barW
+  ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.fillRect(barX, 50, barW, 12)
+  ctx.fillStyle = '#ffd23f'; ctx.fillRect(barX, 50, barW * Math.min(1, score / level.target), 12)
+  ctx.shadowBlur = 0
+  document.getElementById('score').textContent = `Score: ${score}`
+}
+function drawBanner() {
+  const b = document.getElementById('banner')
+  if (levelCompleteAt) {
+    const isLast = levelIdx === LEVELS.length - 1
+    b.style.display = 'flex'
+    b.textContent = `🎉 ${level.name} complete! 🎉\nScore ${score}\n` + (isLast ? 'Back to Swampy Lowlands!' : `On to ${LEVELS[levelIdx + 1].name}!`)
+  } else if (roundOverAt) {
+    b.style.display = 'flex'; b.textContent = `🦖 Oh no! 🦖\nScore ${score} - back up!`
+  } else b.style.display = 'none'
+}
+function drawDebug(now) {
+  const el = document.getElementById('debug'); if (el.style.display === 'none') return
+  el.textContent = `pose: ${poseLive() ? 'LIVE' : 'no signal (keyboard)'}\n` +
+    `dino (${dino.x.toFixed(0)},${dino.y.toFixed(0)}) size ${dino.sizeMul.toFixed(2)}\n` +
+    `prey ${prey.length}/${level.preyMax}  rocks ${rocks.length}\n` +
+    `roar cooldown ${Math.max(0, dino.roarCooldownUntil - now).toFixed(0)}ms\n` +
+    `score ${score} / ${level.target}  lives ${lives}`
+}
+addEventListener('keydown', (e) => { if (e.key === '`') { const el = document.getElementById('debug'); el.style.display = el.style.display === 'none' ? 'block' : 'none' } })
+addEventListener('keydown', (e) => { if (e.key === 'Escape') location.href = 'index.html' })
+
+let lastFrame = performance.now()
+function draw(now) {
+  const dt = Math.min(0.05, (now - lastFrame) / 1000); lastFrame = now
+  update(dt, now)
+  ctx.clearRect(0, 0, W, H)
+  ctx.drawImage(bgCanvas, 0, 0)
+  drawRocks(now) // rocks are flat ground hazards, always drawn beneath the dino/prey
+  const entities = [{ y: dino.y, draw: () => drawDino(now) }, ...prey.map((p) => ({ y: p.y, draw: () => drawOnePrey(p, now) }))]
+  entities.sort((a, b) => a.y - b.y) // back-to-front: smaller y (further away) drawn first
+  for (const e of entities) e.draw()
+  for (const p of particles) { ctx.globalAlpha = Math.max(0, 1 - (now - p.born) / p.life); ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill() }
+  ctx.globalAlpha = 1
+  for (const p of fx) { ctx.globalAlpha = Math.max(0, 1 - (now - p.born) / p.life); ctx.textAlign = 'center'; ctx.font = '800 24px system-ui'; ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 6; ctx.fillText(p.text, p.x, p.y); ctx.shadowBlur = 0 }
+  ctx.globalAlpha = 1
+  drawHUD(); drawConfetti(); drawBanner(); drawDebug(now)
+  requestAnimationFrame(draw)
+}
+
+window.DEBUG = {
+  get dino() { return dino }, get prey() { return prey }, get rocks() { return rocks },
+  get score() { return score }, get lives() { return lives }, get level() { return level }, levelIdx, LEVELS,
+  onPose, tryRoar, get roundOverAt() { return roundOverAt }, get levelCompleteAt() { return levelCompleteAt },
+}
+
+addEventListener('resize', resize)
+resize(); resetDino()
+nextPreyAt = performance.now() + 400; nextRockAt = performance.now() + 1500
+requestAnimationFrame(draw)
+</script>
