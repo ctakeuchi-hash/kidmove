@@ -17,7 +17,7 @@
   .spTrack{padding:8px;border-radius:10px;cursor:pointer;display:flex;gap:10px;align-items:center;text-align:left}
   .spTrack:hover{background:#ffffff14}
 </style>
-<pre id="hint">Drum along to the beat! Swing a hand down like a drumstick when a note reaches the ring - left hand for the blue lane, right hand for the orange lane. No phone: F/J keys or click the top/bottom half. Esc for menu.</pre>
+<pre id="hint">Drum along to the beat! The drummer copies your arms - swing a hand down when a note lands on the drum: left hand for the blue (left) side, right hand for the red (right) side. No phone: F/J keys or click the left/right half. Esc for menu.</pre>
 <button id="spotifyBtn">🎵 Spotify</button>
 <div id="spotifyPanel"><div id="spotifyPanelBody"></div></div>
 <div id="ver"></div>
@@ -51,22 +51,28 @@ function notesFromBars(bpm, bars) {
   return { notes, totalMs: step * stepMs }
 }
 function buildSong(name, bpm, bars, theme) { const { notes, totalMs } = notesFromBars(bpm, bars); return { name, bpm, notes, totalMs, theme } }
-const SONGS = [
-  buildSong('Sunshine Beat', 78, Array(8).fill('L...R...'), { bg: ['#fff2b0', '#7fc8f8'] }),
-  buildSong('Bouncy Bus', 96, altBars('L.R.L.R.', 'L.RBL.R.', 6), { bg: ['#c8f7c5', '#4fb3ff'] }),
-  buildSong('Jungle Groove', 112, altBars('L.R.L.RB', 'L.RL.R.B', 8), { bg: ['#ffd9a0', '#3aa66b'] }),
-  buildSong('Rocket Rhythm', 130, altBars('LRLRLRLR', 'LRBLRB..', 10), { bg: ['#f0a0e8', '#241a4a'] }),
+const SONGS = [ // bg = festival sky, top to horizon
+  buildSong('Sunshine Beat', 78, Array(8).fill('L...R...'), { bg: ['#ffd27a', '#ff8a5c'] }),
+  buildSong('Bouncy Bus', 96, altBars('L.R.L.R.', 'L.RBL.R.', 6), { bg: ['#8fd3ff', '#3f7fd6'] }),
+  buildSong('Jungle Groove', 112, altBars('L.R.L.RB', 'L.RL.R.B', 8), { bg: ['#2f7d5b', '#103a2a'] }),
+  buildSong('Rocket Rhythm', 130, altBars('LRLRLRLR', 'LRBLRB..', 10), { bg: ['#3a2370', '#0b0722'] }),
 ]
 const params = new URLSearchParams(location.search)
 let score = parseInt(params.get('score')) || 0
 
 const cv = document.getElementById('c'), ctx = cv.getContext('2d')
 let W, H
-function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight }
+// ---- Layout: the whole stage (drums, drummer, note columns) is sized off one unit `u`, so it scales with the
+// window. One big drum in front of the drummer: its left half = left hand (lane 0), right half = right hand. The
+// drummer mirrors you like a mirror would, so "hit the left side with your left hand" needs no explaining. ----
+let u, cx, floorY, headY, drumX
+function resize() {
+  W = cv.width = innerWidth; H = cv.height = innerHeight
+  u = Math.min(H / 100, W / 120); cx = W / 2; floorY = H - 12 * u
+  headY = floorY - 32 * u; drumX = [cx - 16 * u, cx + 16 * u] // headY = drum-head level; drumX = where each lane's notes land on it
+}
 addEventListener('resize', resize); resize()
-const laneY = (l) => l === 0 ? H * 0.36 : H * 0.62
-const targetX = () => W * 0.14
-const spawnX = () => W * 1.05
+const LANE_COLOR = ['#2f8cff', '#ff4b3a'], LANE_DARK = ['#0b3f86', '#9c1b10']
 
 // ---- Timing: a short lead-in count-in before the beat starts, matching the STAGES text below. `song`/`songIdx`/
 // `mode`/`t0` are mutable - startBuiltinSong() and startSpotifySong() (below) both (re)initialize them, so picking
@@ -141,26 +147,35 @@ function strike(lane) {
     const d = Math.abs(elapsed - n.t)
     if (d <= HIT_WINDOW_MS && d < bestDist) { best = n; bestDist = d }
   }
-  pulse(lane, 1)
+  pulse(lane, 1); swingAt[lane] = performance.now()
   if (!best) return
   best.hit = true; combo++; bestCombo = Math.max(bestCombo, combo); score += 10 + Math.min(combo, 10)
-  hitChime(Math.min(combo, 4))
-  spark(targetX(), laneY(lane), 12, lane === 0 ? '#4fc3ff' : '#ffb24f')
-  popText(combo > 1 ? `${combo} combo!` : 'Nice!', targetX(), laneY(lane) - 50, '#fff')
+  hitChime(Math.min(combo, 4)); happyUntil = performance.now() + 350
+  spark(drumX[lane], headY, 14, LANE_COLOR[lane]); spark(drumX[lane], headY, 6, '#ffe27a')
+  popText(combo > 1 ? `${combo} combo!` : bestDist <= 90 ? 'Great!' : 'Good!', drumX[lane], headY - 14 * u, '#fff')
   if (combo && combo % 10 === 0) burstConfetti(60)
 }
 
 // ---- Input: phone pose (a quick downward swing of either wrist), keyboard F/J, or a click on the top/bottom
 // half - same "phone optional" fallback as flight-test.html's keyboard controls. ----
 const POSE_TIMEOUT_MS = 500, STRIKE_VELOCITY = 1.8, STRIKE_COOLDOWN_MS = 220
-const wristHist = [[], []], wristY = [0.5, 0.5], lastStrikeAt = [-1e9, -1e9]
+const wristHist = [[], []], lastStrikeAt = [-1e9, -1e9]
 let lastPoseAt = -1e9
+// The drummer's arms copy yours: each wrist relative to its shoulder, in shoulder-widths (so it doesn't matter how
+// far from the phone you stand), stored as [outward, down] in mirror space - see handTarget() for how that becomes
+// a hand position on screen. tilt = shoulder slope, so leaning to one side leans the drummer too.
+const poseRel = [[0.45, -0.75], [0.45, -0.75]]
+let poseTilt = 0
 // b = phone's full body keypoint array, phone-app's BODY order: [nose, Lsh, Rsh, Lel, Rel, Lwr, Rwr, Lhip, Rhip, ...]
-function onPose(b) {
+// ar = camera aspect ratio (x is a fraction of width, y of height, so x needs * ar to be in the same units as y).
+function onPose(b, ar = 1) {
   const now = performance.now(); lastPoseAt = now
+  const sw = Math.hypot((b[2][0] - b[1][0]) * ar, b[2][1] - b[1][1]) || 0.001
+  poseTilt = poseTilt * 0.7 + Math.max(-0.3, Math.min(0.3, Math.atan2(b[2][1] - b[1][1], sw))) * 0.3
   ;[5, 6].forEach((idx, lane) => {
-    const y = b[idx][1]
-    wristY[lane] = wristY[lane] * 0.7 + y * 0.3
+    const y = b[idx][1], sh = b[idx - 4], side = lane ? 1 : -1 // camera x is unmirrored: -dx is screen-space
+    const rel = [-(b[idx][0] - sh[0]) * ar / sw * side, (y - sh[1]) / sw]
+    poseRel[lane][0] = poseRel[lane][0] * 0.5 + rel[0] * 0.5; poseRel[lane][1] = poseRel[lane][1] * 0.5 + rel[1] * 0.5
     const h = wristHist[lane]; h.push({ t: now, y }); while (h.length && now - h[0].t > 150) h.shift()
     if (h.length < 2) return
     const vel = (y - h[0].y) / ((now - h[0].t) / 1000) // normalized y-units/sec, positive = swinging down
@@ -168,8 +183,8 @@ function onPose(b) {
   })
 }
 const ws = new WebSocket(`wss://${location.host}/?role=tv`)
-ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type === 'kp') { const b = (m.ps?.[0] || m).b; if (b) onPose(b) } }
-addEventListener('pointerdown', (e) => { unlock(); if (e.target.closest('#spotifyPanel, #spotifyBtn')) return; if (e.clientY < H / 2) strike(0); else strike(1) })
+ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type === 'kp') { const b = (m.ps?.[0] || m).b; if (b) onPose(b, m.ar || 1) } }
+addEventListener('pointerdown', (e) => { unlock(); if (e.target.closest('#spotifyPanel, #spotifyBtn')) return; if (e.clientX < W / 2) strike(0); else strike(1) })
 addEventListener('keydown', (e) => {
   unlock()
   if (document.getElementById('spotifyPanel').style.display === 'flex') return // don't drum while typing/tapping in the panel
@@ -338,42 +353,256 @@ document.getElementById('spotifyBtn').onclick = async () => {
   spotifyPanelShow((await spotifyToken()) ? 'search' : 'login')
 }
 
-// ---- Render ----
-function drawBackground() {
-  const g = ctx.createLinearGradient(0, 0, 0, H)
+// ---- Render: a summer-festival (matsuri) stage - paper lanterns, wooden boards, a red-and-white kohaku skirt -
+// with two nagado-daiko drums and a drummer in a happi coat and twisted hachimaki headband. All drawn in canvas,
+// no image files, same as the rest of tv-app. ----
+const SKIN = '#f6c9a0', SKIN_DARK = '#d99a6c', COAT = '#21346e', COAT_DARK = '#16234d', STICK = '#f0cf8f'
+const NOTE_R = () => 4.4 * u
+function path(pts) { ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath() }
+function seg(x1, y1, x2, y2, w, c, cap = 'round') { ctx.strokeStyle = c; ctx.lineWidth = w; ctx.lineCap = cap; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke() }
+
+function drawLantern(x, y, s, now) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(Math.sin(now / 900 + x * 0.01) * 0.06)
+  const glow = ctx.createRadialGradient(0, s * 1.2, 0, 0, s * 1.2, s * 3)
+  glow.addColorStop(0, 'rgba(255,190,90,.45)'); glow.addColorStop(1, 'rgba(255,190,90,0)')
+  ctx.fillStyle = glow; ctx.fillRect(-s * 3, -s * 2, s * 6, s * 6.4)
+  seg(0, -s * 0.4, 0, 0, s * 0.08, '#222')
+  const body = ctx.createRadialGradient(-s * 0.2, s, s * 0.1, 0, s * 1.2, s)
+  body.addColorStop(0, '#ff8a65'); body.addColorStop(1, '#c62828')
+  ctx.fillStyle = body; ctx.beginPath(); ctx.ellipse(0, s * 1.2, s * 0.8, s, 0, 0, 7); ctx.fill()
+  ctx.strokeStyle = 'rgba(90,10,10,.45)'; ctx.lineWidth = s * 0.05
+  for (const k of [-0.6, -0.3, 0, 0.3, 0.6]) { ctx.beginPath(); ctx.ellipse(0, s * 1.2 + k * s, s * 0.8 * Math.sqrt(1 - k * k), s * 0.08, 0, 0, 7); ctx.stroke() }
+  ctx.fillStyle = '#2a1a12'; ctx.fillRect(-s * 0.42, 0, s * 0.84, s * 0.32); ctx.fillRect(-s * 0.42, s * 2.08, s * 0.84, s * 0.32)
+  ctx.fillStyle = '#fff3'; ctx.font = `900 ${s * 0.75}px serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('祭', 0, s * 1.25)
+  ctx.textBaseline = 'alphabetic'; ctx.restore()
+}
+
+function drawBackground(now) {
+  const g = ctx.createLinearGradient(0, 0, 0, floorY)
   g.addColorStop(0, song.theme.bg[0]); g.addColorStop(1, song.theme.bg[1])
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H)
+  // spotlight on the drummer
+  const spot = ctx.createRadialGradient(cx, floorY - 30 * u, 0, cx, floorY - 30 * u, 70 * u)
+  spot.addColorStop(0, 'rgba(255,240,200,.35)'); spot.addColorStop(1, 'rgba(255,240,200,0)')
+  ctx.fillStyle = spot; ctx.fillRect(0, 0, W, H)
+  // lantern string sagging across the top
+  const sagY = (x) => 3 * u + 6 * u * (1 - ((2 * x / W) - 1) ** 2)
+  ctx.strokeStyle = '#2228'; ctx.lineWidth = 0.4 * u; ctx.beginPath()
+  for (let x = 0; x <= W; x += 20) x ? ctx.lineTo(x, sagY(x)) : ctx.moveTo(x, sagY(x))
+  ctx.stroke()
+  for (const f of [0.05, 0.15, 0.25, 0.75, 0.85, 0.95]) drawLantern(f * W, sagY(f * W), 3.2 * u, now)
+  // stage boards
+  const wood = ctx.createLinearGradient(0, floorY, 0, floorY + 5 * u)
+  wood.addColorStop(0, '#c08a52'); wood.addColorStop(1, '#8a5a2b')
+  ctx.fillStyle = wood; ctx.fillRect(0, floorY, W, 5 * u)
+  ctx.strokeStyle = '#6b4220'; ctx.lineWidth = 0.25 * u
+  for (const k of [1.4, 3]) { ctx.beginPath(); ctx.moveTo(0, floorY + k * u); ctx.lineTo(W, floorY + k * u); ctx.stroke() }
+  // kohaku (red & white) stage skirt
+  const top = floorY + 5 * u, sw = 4 * u
+  for (let i = 0, x = 0; x < W; i++, x += sw) { ctx.fillStyle = i % 2 ? '#fff' : '#d32f2f'; ctx.fillRect(x, top, sw + 1, H - top) }
+  ctx.fillStyle = '#0003'; ctx.fillRect(0, top, W, 0.8 * u)
 }
-function drawLane(l) {
-  ctx.strokeStyle = 'rgba(255,255,255,.18)'; ctx.lineWidth = H * 0.1
-  ctx.beginPath(); ctx.moveTo(targetX(), laneY(l)); ctx.lineTo(W, laneY(l)); ctx.stroke()
+
+function drawColumn(l) { // the track a note falls down, ending in the landing ring on the drum head
+  const x = drumX[l], w = NOTE_R() * 1.4
+  const g = ctx.createLinearGradient(0, 0, 0, headY)
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.22)')
+  ctx.fillStyle = g; ctx.fillRect(x - w, 0, w * 2, headY)
+}
+function drawRing(l) {
+  const x = drumX[l], r = NOTE_R() * 1.25
+  ctx.lineWidth = 0.7 * u; ctx.strokeStyle = `rgba(255,255,255,${0.75 + drumPulse[l] * 0.25})`
+  ctx.beginPath(); ctx.arc(x, headY, r * (1 + drumPulse[l] * 0.25), 0, 7); ctx.stroke()
+  ctx.strokeStyle = LANE_COLOR[l]; ctx.lineWidth = 0.35 * u; ctx.beginPath(); ctx.arc(x, headY, r * 0.82, 0, 7); ctx.stroke()
+}
+function drawNote(x, y, lane, missed) {
+  const r = NOTE_R()
+  ctx.globalAlpha = missed ? 0.35 : 1
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fillStyle = '#222'; ctx.fill()
+  ctx.beginPath(); ctx.arc(x, y, r * 0.86, 0, 7); ctx.fillStyle = '#fff'; ctx.fill()
+  const g = ctx.createRadialGradient(x - r * 0.25, y - r * 0.3, r * 0.1, x, y, r * 0.72)
+  g.addColorStop(0, missed ? '#bbb' : '#fff8'); g.addColorStop(0.25, missed ? '#999' : LANE_COLOR[lane]); g.addColorStop(1, missed ? '#777' : LANE_DARK[lane])
+  ctx.beginPath(); ctx.arc(x, y, r * 0.72, 0, 7); ctx.fillStyle = g; ctx.fill()
+  ctx.fillStyle = '#111' // a little Taiko-style face
+  for (const d of [-1, 1]) { ctx.beginPath(); ctx.arc(x + d * r * 0.28, y - r * 0.08, r * 0.09, 0, 7); ctx.fill() }
+  ctx.strokeStyle = '#111'; ctx.lineWidth = r * 0.08; ctx.beginPath(); ctx.arc(x, y + r * 0.08, r * 0.2, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke()
+  ctx.globalAlpha = 1
 }
 function drawNotes(elapsed) {
+  const fall = headY + 6 * u
   for (const n of song.notes) {
     if (n.hit) continue
     const dt = n.t - elapsed
     if (dt > NOTE_TRAVEL_MS || dt < -HIT_WINDOW_MS - 50) continue
-    const x = targetX() + (dt / NOTE_TRAVEL_MS) * (spawnX() - targetX()), y = laneY(n.lane), r = H * 0.035
-    ctx.beginPath(); ctx.arc(x, y, r, 0, 7)
-    ctx.fillStyle = n.missed ? 'rgba(255,255,255,.3)' : (n.lane === 0 ? '#2fb2ff' : '#ff9a3d')
-    ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke()
+    drawNote(drumX[n.lane], headY - (dt / NOTE_TRAVEL_MS) * fall, n.lane, n.missed)
   }
 }
-function drawDrum(l) {
-  const x = targetX(), y = laneY(l), color = l === 0 ? '#2fb2ff' : '#ff9a3d', dark = l === 0 ? '#0e5a86' : '#a85210'
-  const r = H * 0.078 * (1 + drumPulse[l] * 0.3)
-  ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.85, 0, 0, 7); ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = dark; ctx.lineWidth = 6; ctx.stroke()
-  ctx.fillStyle = '#fff'
-  for (const d of [-1, 1]) { ctx.beginPath(); ctx.arc(x + d * r * 0.3, y - r * 0.15, r * 0.14, 0, 7); ctx.fill() }
-  ctx.fillStyle = '#123'
-  for (const d of [-1, 1]) { ctx.beginPath(); ctx.arc(x + d * r * 0.3, y - r * 0.15, r * 0.07, 0, 7); ctx.fill() }
-  ctx.strokeStyle = '#123'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(x, y + r * 0.25, r * 0.22, 0, Math.PI); ctx.stroke()
+
+const HEAD_RX = () => 30 * u, HEAD_RY = () => 9 * u
+function drawDrum() { // nagado-daiko: lacquered barrel, brass tacks, a ring handle, on a low wooden stand
+  const x = cx, rx = HEAD_RX(), ry = HEAD_RY(), top = headY, bot = floorY - 6 * u, mid = (top + bot) / 2
+  // stand
+  seg(x - rx * 0.7, bot - u, x - rx * 0.95, floorY, 1.6 * u, '#3b2414'); seg(x + rx * 0.7, bot - u, x + rx * 0.95, floorY, 1.6 * u, '#3b2414')
+  seg(x - rx * 0.85, floorY - 3 * u, x + rx * 0.85, floorY - 3 * u, 1.2 * u, '#4a2e1a')
+  // barrel
+  ctx.beginPath(); ctx.moveTo(x - rx, top)
+  ctx.quadraticCurveTo(x - rx * 1.16, mid, x - rx, bot)
+  ctx.ellipse(x, bot, rx, ry, 0, Math.PI, 0, true)
+  ctx.quadraticCurveTo(x + rx * 1.16, mid, x + rx, top); ctx.closePath()
+  const wood = ctx.createLinearGradient(x - rx, 0, x + rx, 0)
+  wood.addColorStop(0, '#3a160a'); wood.addColorStop(0.35, '#a8461f'); wood.addColorStop(0.5, '#c4602e'); wood.addColorStop(1, '#3a160a')
+  ctx.fillStyle = wood; ctx.fill()
+  ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(40,10,0,.35)'; ctx.lineWidth = 0.25 * u
+  for (const k of [-0.66, -0.33, 0, 0.33, 0.66]) { ctx.beginPath(); ctx.moveTo(x + k * rx, top); ctx.quadraticCurveTo(x + k * rx * 1.16, mid, x + k * rx, bot + ry); ctx.stroke() }
+  ctx.restore()
+  // brass tacks under the top rim and above the bottom rim
+  for (const [yy, k] of [[top + 1.3 * u, 1], [bot - 1.3 * u, 1]]) for (let i = 1; i < 24; i++) {
+    const a = Math.PI * i / 24, tx = x - Math.cos(a) * rx * k * 0.98, ty = yy + Math.sin(a) * ry
+    ctx.beginPath(); ctx.arc(tx, ty, 0.55 * u, 0, 7); ctx.fillStyle = '#e8c35a'; ctx.fill(); ctx.strokeStyle = '#7a5a12'; ctx.lineWidth = 0.15 * u; ctx.stroke()
+  }
+  // ring handle
+  ctx.strokeStyle = '#d8b04a'; ctx.lineWidth = 0.7 * u; ctx.beginPath(); ctx.ellipse(x, mid + 4 * u, 2.6 * u, 3 * u, 0, 0, 7); ctx.stroke()
+  ctx.fillStyle = '#d8b04a'; ctx.beginPath(); ctx.arc(x, mid + 0.9 * u, 1.1 * u, 0, 7); ctx.fill()
+  // head (cowhide): each half tinted faintly in its hand's color, and flashing that color when hit
+  ctx.beginPath(); ctx.ellipse(x, top, rx, ry, 0, 0, 7); ctx.fillStyle = '#5a2a10'; ctx.fill()
+  ctx.beginPath(); ctx.ellipse(x, top, rx * 0.95, ry * 0.88, 0, 0, 7)
+  const hide = ctx.createRadialGradient(x - rx * 0.2, top - ry * 0.3, 0, x, top, rx)
+  hide.addColorStop(0, '#fff8e6'); hide.addColorStop(1, '#e2cfa2'); ctx.fillStyle = hide; ctx.fill()
+  ctx.save(); ctx.clip()
+  for (const l of [0, 1]) {
+    ctx.globalAlpha = 0.12 + drumPulse[l] * 0.6; ctx.fillStyle = LANE_COLOR[l]
+    ctx.fillRect(l ? x : x - rx, top - ry, rx, ry * 2)
+  }
+  ctx.globalAlpha = 1; ctx.restore()
+  seg(x, top - ry * 0.85, x, top + ry * 0.85, 0.3 * u, 'rgba(90,40,10,.35)') // centre line between the halves
 }
-function drawHandDots(now) {
-  if (now - lastPoseAt > POSE_TIMEOUT_MS * 3) return
-  for (let l = 0; l < 2; l++) {
-    const x = W * 0.5 + (l === 0 ? -40 : 40), y = H * 0.15 + wristY[l] * H * 0.65
-    ctx.globalAlpha = 0.85; ctx.beginPath(); ctx.arc(x, y, 14, 0, 7); ctx.fillStyle = l === 0 ? '#2fb2ff' : '#ff9a3d'; ctx.fill(); ctx.globalAlpha = 1
+
+// ---- The drummer. Arms: a target hand position (copied from your pose, or a swing animation for keys/clicks),
+// then 2-bone IK for the elbow, and the drumstick (bachi) carries on from the forearm - if its tip would go
+// through a drum head the hand is lifted so the stick rests on the head, which is what makes it read as drumming. ----
+const UPPER = 13, FORE = 12, BACHI = 14, SWING_MS = 260
+const REST = [0.35, -0.75], STRIKE = [0.4, 1.3] // [outward, down] in shoulder-widths, same space as poseRel
+const swingAt = [-1e9, -1e9], hands = [null, null]
+let happyUntil = 0, tilt = 0, blinkAt = 0
+const poseLive = (now) => now - lastPoseAt < POSE_TIMEOUT_MS
+function body(now, elapsed) { // hip centre + shoulders in screen space, with a little bob to the beat
+  const beat = 60000 / song.bpm, bob = phase === 'playing' ? Math.abs(Math.sin(elapsed / beat * Math.PI)) * 0.8 * u : 0
+  const hx = cx, hy = floorY - 30 * u + bob, c = Math.cos(tilt), s = Math.sin(tilt)
+  const sh = [-1, 1].map((d) => { const lx = d * 10 * u, ly = -26 * u; return [hx + lx * c - ly * s, hy + lx * s + ly * c] })
+  return { hx, hy, sh }
+}
+function handTarget(l, now, sh) {
+  let rel = poseRel[l]
+  if (!poseLive(now)) {
+    const p = (now - swingAt[l]) / SWING_MS
+    const k = p < 0 || p >= 1 ? 0 : p < 0.35 ? 1 - (1 - p / 0.35) ** 2 : 1 - (p - 0.35) / 0.65
+    rel = [REST[0] + (STRIKE[0] - REST[0]) * k, REST[1] + (STRIKE[1] - REST[1]) * k + Math.sin(now / 400 + l * 2) * 0.05]
+  }
+  const side = l ? 1 : -1, toward = Math.max(0, Math.min(1, rel[1] / 1.2)) // the lower the hand, the more it drifts over its half of the drum
+  return [sh[0] + side * (rel[0] * 13 + toward * 2) * u, sh[1] + rel[1] * 13 * u]
+}
+function solveArm(l, S, T) {
+  const side = l ? 1 : -1, a = UPPER * u, b = FORE * u
+  let dx = T[0] - S[0], dy = T[1] - S[1], d = Math.hypot(dx, dy) || 1
+  const reach = Math.max(Math.abs(a - b) + 1, Math.min(d, (a + b) * 0.98))
+  const hand = [S[0] + dx / d * reach, S[1] + dy / d * reach]
+  const base = Math.atan2(dy, dx), bend = Math.acos(Math.max(-1, Math.min(1, (a * a + reach * reach - b * b) / (2 * a * reach))))
+  const cands = [base + bend, base - bend].map((t) => [S[0] + Math.cos(t) * a, S[1] + Math.sin(t) * a])
+  const elbow = (cands[0][0] - cands[1][0]) * side > 0 ? cands[0] : cands[1] // elbows bend outward
+  let fx = hand[0] - elbow[0], fy = hand[1] - elbow[1], fl = Math.hypot(fx, fy) || 1
+  fx = fx / fl + side * 0.6; fy = fy / fl + 0.55; fl = Math.hypot(fx, fy) // sticks angle outward, like a real kamae stance
+  const dir = [fx / fl, fy / fl], tip = [hand[0] + dir[0] * BACHI * u, hand[1] + dir[1] * BACHI * u]
+  return { elbow, hand, dir, tip }
+}
+function arm(l, now, sh) {
+  const T = handTarget(l, now, sh[l])
+  const h = hands[l] ||= T.slice(), k = 1 - Math.exp(-(1 / 60) * 30) // ease toward the target so pose jitter doesn't twitch
+  h[0] += (T[0] - h[0]) * k; h[1] += (T[1] - h[1]) * k
+  let r = solveArm(l, sh[l], h)
+  if (r.tip[1] > headY && Math.abs(r.tip[0] - cx) < HEAD_RX() * 1.02) r = solveArm(l, sh[l], [r.hand[0], r.hand[1] - (r.tip[1] - headY)])
+  return r
+}
+function drawArm(S, r, l) {
+  const { elbow: E, hand: Hd, dir, tip } = r
+  seg(E[0], E[1], Hd[0], Hd[1], 4.2 * u, SKIN_DARK); seg(E[0], E[1], Hd[0], Hd[1], 3.4 * u, SKIN) // forearm
+  const at = (k) => [S[0] + (E[0] - S[0]) * k, S[1] + (E[1] - S[1]) * k], cuff = at(0.9), hem = at(0.8)
+  seg(S[0], S[1], cuff[0], cuff[1], 7.4 * u, COAT_DARK); seg(S[0], S[1], cuff[0], cuff[1], 6.4 * u, COAT) // happi sleeve
+  seg(hem[0], hem[1], cuff[0], cuff[1], 7.4 * u, '#f4f1ea', 'butt') // white sleeve hem
+  const back = [Hd[0] - dir[0] * 2 * u, Hd[1] - dir[1] * 2 * u]
+  seg(back[0], back[1], tip[0], tip[1], 2 * u, '#8a6a33'); seg(back[0], back[1], tip[0], tip[1], 1.4 * u, STICK) // bachi
+  ctx.beginPath(); ctx.arc(tip[0], tip[1], 1.1 * u, 0, 7); ctx.fillStyle = STICK; ctx.fill(); ctx.strokeStyle = '#8a6a33'; ctx.lineWidth = 0.3 * u; ctx.stroke()
+  ctx.beginPath(); ctx.arc(Hd[0], Hd[1], 2.5 * u, 0, 7); ctx.fillStyle = SKIN; ctx.fill(); ctx.strokeStyle = SKIN_DARK; ctx.lineWidth = 0.4 * u; ctx.stroke() // fist
+}
+function drawDrummer(now, { hx, hy }) {
+  // legs: dark momohiki trousers in a wide drumming stance, black jika-tabi
+  ctx.fillStyle = '#1b1b2f'
+  path([[hx - 10 * u, hy], [hx - 0.5 * u, hy], [hx - 5.5 * u, floorY - 1.5 * u], [hx - 11.5 * u, floorY - 1.5 * u]]); ctx.fill()
+  path([[hx + 10 * u, hy], [hx + 0.5 * u, hy], [hx + 5.5 * u, floorY - 1.5 * u], [hx + 11.5 * u, floorY - 1.5 * u]]); ctx.fill()
+  ctx.fillStyle = '#111'
+  for (const d of [-1, 1]) { ctx.beginPath(); ctx.ellipse(hx + d * 9.5 * u, floorY - 0.8 * u, 4 * u, 1.6 * u, 0, 0, 7); ctx.fill() }
+  ctx.save(); ctx.translate(hx, hy); ctx.rotate(tilt)
+  // happi coat
+  const coat = ctx.createLinearGradient(-11 * u, 0, 11 * u, 0)
+  coat.addColorStop(0, COAT_DARK); coat.addColorStop(0.5, COAT); coat.addColorStop(1, COAT_DARK)
+  ctx.fillStyle = coat; path([[-10.5 * u, -27 * u], [10.5 * u, -27 * u], [12 * u, 5 * u], [-12 * u, 5 * u]]); ctx.fill()
+  ctx.fillStyle = '#ffffff22' // seigaiha-ish wave dots
+  for (let y = -20; y < 4; y += 4) for (let x = -9; x <= 9; x += 4) { ctx.beginPath(); ctx.arc((x + (y % 8 ? 2 : 0)) * u, y * u, 0.9 * u, Math.PI, 0); ctx.fill() }
+  ctx.fillStyle = '#f4f1ea'; path([[-3.2 * u, -27 * u], [3.2 * u, -27 * u], [0, -13 * u]]); ctx.fill() // undershirt
+  ctx.strokeStyle = '#c62828'; ctx.lineWidth = 2.4 * u; ctx.lineCap = 'butt' // collar (eri) crossing into a V
+  ctx.beginPath(); ctx.moveTo(-3.4 * u, -27.5 * u); ctx.lineTo(1 * u, -12 * u); ctx.lineTo(1 * u, 5 * u); ctx.stroke()
+  ctx.beginPath(); ctx.moveTo(3.4 * u, -27.5 * u); ctx.lineTo(-0.2 * u, -15 * u); ctx.stroke()
+  ctx.fillStyle = '#fff'; ctx.font = `900 ${2 * u}px serif`; ctx.textAlign = 'center'; ctx.fillText('祭', 1 * u, -6.5 * u)
+  ctx.fillStyle = '#d32f2f'; ctx.fillRect(-11.6 * u, -3.5 * u, 23.2 * u, 3.6 * u) // obi
+  ctx.fillStyle = '#ffd54f'; ctx.fillRect(-11.6 * u, -2 * u, 23.2 * u, 0.5 * u)
+  ctx.fillStyle = '#ffffffcc'; ctx.fillRect(-12 * u, 3.6 * u, 24 * u, 1.4 * u) // white hem trim
+  // neck + head
+  ctx.fillStyle = SKIN; ctx.fillRect(-2.2 * u, -30 * u, 4.4 * u, 4 * u)
+  const hy0 = -37 * u
+  ctx.fillStyle = '#1a1210'; ctx.beginPath(); ctx.arc(0, hy0 - 1.2 * u, 9 * u, 0, 7); ctx.fill() // hair
+  ctx.fillStyle = SKIN; ctx.beginPath(); ctx.ellipse(0, hy0 + 1.4 * u, 7.6 * u, 7 * u, 0, 0, 7); ctx.fill()
+  ctx.fillStyle = '#1a1210'; ctx.beginPath(); ctx.moveTo(-7.4 * u, hy0 - 1 * u) // fringe
+  for (let i = 0; i <= 6; i++) ctx.lineTo((-7.4 + i * 14.8 / 6) * u, hy0 + (i % 2 ? -1 : -3.4) * u)
+  ctx.lineTo(7.4 * u, hy0 - 6 * u); ctx.lineTo(-7.4 * u, hy0 - 6 * u); ctx.fill()
+  // nejiri hachimaki: twisted red-and-white headband, knot on the side with fluttering tails
+  const by = hy0 - 4.6 * u
+  ctx.save(); ctx.beginPath(); ctx.rect(-9.2 * u, by - 1.3 * u, 18.4 * u, 2.6 * u); ctx.clip()
+  ctx.fillStyle = '#fff'; ctx.fillRect(-9.2 * u, by - 1.3 * u, 18.4 * u, 2.6 * u)
+  ctx.strokeStyle = '#d32f2f'; ctx.lineWidth = 1 * u
+  for (let x = -10; x < 10; x += 2.4) { ctx.beginPath(); ctx.moveTo(x * u, by + 1.4 * u); ctx.lineTo((x + 2) * u, by - 1.4 * u); ctx.stroke() }
+  ctx.restore()
+  const flutter = Math.sin(now / 140) * 1.2 * u
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#d32f2f'; ctx.lineWidth = 0.4 * u
+  for (const [ex, ey] of [[15 * u, by - 3 * u + flutter], [14 * u, by + 3 * u - flutter]]) {
+    ctx.beginPath(); ctx.moveTo(8 * u, by - 0.8 * u); ctx.quadraticCurveTo(11 * u, by + flutter * 0.5, ex, ey); ctx.lineTo(ex - 0.6 * u, ey + 1.4 * u)
+    ctx.quadraticCurveTo(10.5 * u, by + 1.5 * u + flutter * 0.5, 8 * u, by + 0.8 * u); ctx.fill(); ctx.stroke()
+  }
+  ctx.beginPath(); ctx.arc(8.4 * u, by, 1.6 * u, 0, 7); ctx.fill(); ctx.stroke()
+  // face: blinks now and then, opens its mouth for a big "Yo!" on every good hit
+  const happy = now < happyUntil
+  if (now > blinkAt + 3600) blinkAt = now
+  const blink = now - blinkAt < 130
+  ctx.fillStyle = '#1a1210'
+  for (const d of [-1, 1]) {
+    if (blink || happy) { ctx.strokeStyle = '#1a1210'; ctx.lineWidth = 0.6 * u; ctx.beginPath(); ctx.arc(d * 3 * u, hy0 + 1.4 * u, 1.2 * u, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke() }
+    else { ctx.beginPath(); ctx.ellipse(d * 3 * u, hy0 + 1 * u, 1 * u, 1.35 * u, 0, 0, 7); ctx.fill()
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(d * 3 * u + 0.35 * u, hy0 + 0.5 * u, 0.38 * u, 0, 7); ctx.fill(); ctx.fillStyle = '#1a1210' }
+  }
+  ctx.fillStyle = '#ff8a8a77'; for (const d of [-1, 1]) { ctx.beginPath(); ctx.arc(d * 5 * u, hy0 + 3.6 * u, 1.3 * u, 0, 7); ctx.fill() }
+  if (happy || combo >= 5) { ctx.fillStyle = '#8b1a1a'; ctx.beginPath(); ctx.ellipse(0, hy0 + 4.4 * u, 1.9 * u, happy ? 1.8 * u : 1 * u, 0, 0, Math.PI); ctx.fill() }
+  else { ctx.strokeStyle = '#8b1a1a'; ctx.lineWidth = 0.55 * u; ctx.beginPath(); ctx.arc(0, hy0 + 3.4 * u, 1.8 * u, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke() }
+  ctx.restore()
+}
+function drawStage(now, elapsed) {
+  tilt += ((poseLive(now) ? poseTilt : Math.sin(elapsed / (60000 / song.bpm) * Math.PI) * 0.025) - tilt) * 0.2
+  const b = body(now, elapsed), arms = [0, 1].map((l) => arm(l, now, b.sh))
+  drawColumn(0); drawColumn(1)
+  drawDrummer(now, b)
+  drawDrum()
+  drawRing(0); drawRing(1)
+  arms.forEach((r, l) => drawArm(b.sh[l], r, l))
+  if (!poseLive(now) && now > 4000) {
+    ctx.font = `600 ${2.2 * u}px system-ui`; ctx.textAlign = 'center'; ctx.fillStyle = '#fffd'
+    ctx.fillText('No phone? Press F / J or click the left / right half', cx, floorY + 3.4 * u)
   }
 }
 function drawCountdown(elapsed) {
@@ -397,17 +626,15 @@ function draw() {
   const elapsed = now - t0
   if (phase === 'countdown' && elapsed >= 0) phase = 'playing'
   ctx.clearRect(0, 0, W, H)
-  drawBackground()
+  drawBackground(now)
   if (phase !== 'celebrate' && phase !== 'idle') {
     for (const n of song.notes) {
       if (!n.played && elapsed >= n.t) { if (mode === 'builtin') drumHit(n.lane); n.played = true; pulse(n.lane, 0.5) }
       if (!n.hit && !n.missed && elapsed > n.t + HIT_WINDOW_MS) n.missed = true
     }
     drumPulse[0] = Math.max(0, drumPulse[0] - dt * 2.2); drumPulse[1] = Math.max(0, drumPulse[1] - dt * 2.2)
-    drawLane(0); drawLane(1)
+    drawStage(now, elapsed)
     drawNotes(elapsed)
-    drawDrum(0); drawDrum(1)
-    drawHandDots(now)
     if (phase === 'countdown') drawCountdown(elapsed)
     drawFx(dt)
     ctx.font = '700 30px system-ui'; ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.fillText(song.name, 24, 50)
