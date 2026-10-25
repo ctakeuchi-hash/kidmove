@@ -161,21 +161,19 @@ function strike(lane) {
 const POSE_TIMEOUT_MS = 500, STRIKE_VELOCITY = 1.8, STRIKE_COOLDOWN_MS = 220
 const wristHist = [[], []], lastStrikeAt = [-1e9, -1e9]
 let lastPoseAt = -1e9
-// The drummer's arms copy yours: each wrist relative to its shoulder, in shoulder-widths (so it doesn't matter how
-// far from the phone you stand), stored as [outward, down] in mirror space - see handTarget() for how that becomes
-// a hand position on screen. tilt = shoulder slope, so leaning to one side leans the drummer too.
-const poseRel = [[0.45, -0.75], [0.45, -0.75]]
-let poseTilt = 0
+// The drummer's arms follow only how high each hand is - nothing sideways, no elbows, no leaning - so they can't
+// flail: 0 = stick raised, 1 = stick on the drum. Height is the wrist below its shoulder in shoulder-widths, so it
+// doesn't matter how far from the phone you stand. HAND_UP/HAND_DOWN = the wrist heights that map to 0 and 1.
+const HAND_UP = -0.6, HAND_DOWN = 1.0
+const poseDown = [0, 0]
 // b = phone's full body keypoint array, phone-app's BODY order: [nose, Lsh, Rsh, Lel, Rel, Lwr, Rwr, Lhip, Rhip, ...]
 // ar = camera aspect ratio (x is a fraction of width, y of height, so x needs * ar to be in the same units as y).
 function onPose(b, ar = 1) {
   const now = performance.now(); lastPoseAt = now
   const sw = Math.hypot((b[2][0] - b[1][0]) * ar, b[2][1] - b[1][1]) || 0.001
-  poseTilt = poseTilt * 0.7 + Math.max(-0.3, Math.min(0.3, Math.atan2(b[2][1] - b[1][1], sw))) * 0.3
-  ;[5, 6].forEach((idx, lane) => {
-    const y = b[idx][1], sh = b[idx - 4], side = lane ? 1 : -1 // camera x is unmirrored: -dx is screen-space
-    const rel = [-(b[idx][0] - sh[0]) * ar / sw * side, (y - sh[1]) / sw]
-    poseRel[lane][0] = poseRel[lane][0] * 0.5 + rel[0] * 0.5; poseRel[lane][1] = poseRel[lane][1] * 0.5 + rel[1] * 0.5
+  ;[5, 6].forEach((idx, lane) => { // lane 0 = your left wrist = the screen-left arm, like a mirror
+    const y = b[idx][1], down = Math.max(0, Math.min(1, ((y - b[idx - 4][1]) / sw - HAND_UP) / (HAND_DOWN - HAND_UP)))
+    poseDown[lane] = poseDown[lane] * 0.5 + down * 0.5
     const h = wristHist[lane]; h.push({ t: now, y }); while (h.length && now - h[0].t > 150) h.shift()
     if (h.length < 2) return
     const vel = (y - h[0].y) / ((now - h[0].t) / 1000) // normalized y-units/sec, positive = swinging down
@@ -477,11 +475,12 @@ function drawDrum() { // nagado-daiko: lacquered barrel, brass tacks, a ring han
   seg(x, top - ry * 0.85, x, top + ry * 0.85, 0.3 * u, 'rgba(90,40,10,.35)') // centre line between the halves
 }
 
-// ---- The drummer. Arms: a target hand position (copied from your pose, or a swing animation for keys/clicks),
-// then 2-bone IK for the elbow, and the drumstick (bachi) carries on from the forearm - if its tip would go
-// through a drum head the hand is lifted so the stick rests on the head, which is what makes it read as drumming. ----
+// ---- The drummer. Each arm blends between a fixed raised pose and a fixed strike pose by one 0-1 amount: how low
+// your hand is (poseDown), or a swing animation - every detected hit (or key/click) plays the full swing, so a hit
+// always visibly lands. Then 2-bone IK for the elbow, and the drumstick (bachi) carries on from the forearm - if
+// its tip would go through the drum head the hand is lifted so the stick rests on the head. ----
 const UPPER = 13, FORE = 12, BACHI = 14, SWING_MS = 260
-const REST = [0.35, -0.75], STRIKE = [0.4, 1.3] // [outward, down] in shoulder-widths, same space as poseRel
+const REST = [0.35, -0.75], STRIKE = [0.4, 1.3] // [outward, down] hand offsets from the shoulder, in shoulder-widths
 const swingAt = [-1e9, -1e9], hands = [null, null]
 let happyUntil = 0, tilt = 0, blinkAt = 0
 const poseLive = (now) => now - lastPoseAt < POSE_TIMEOUT_MS
@@ -492,12 +491,10 @@ function body(now, elapsed) { // hip centre + shoulders in screen space, with a 
   return { hx, hy, sh }
 }
 function handTarget(l, now, sh) {
-  let rel = poseRel[l]
-  if (!poseLive(now)) {
-    const p = (now - swingAt[l]) / SWING_MS
-    const k = p < 0 || p >= 1 ? 0 : p < 0.35 ? 1 - (1 - p / 0.35) ** 2 : 1 - (p - 0.35) / 0.65
-    rel = [REST[0] + (STRIKE[0] - REST[0]) * k, REST[1] + (STRIKE[1] - REST[1]) * k + Math.sin(now / 400 + l * 2) * 0.05]
-  }
+  const p = (now - swingAt[l]) / SWING_MS
+  const swing = p < 0 || p >= 1 ? 0 : p < 0.35 ? 1 - (1 - p / 0.35) ** 2 : 1 - (p - 0.35) / 0.65
+  const k = Math.max(swing, poseLive(now) ? poseDown[l] : 0)
+  const rel = [REST[0] + (STRIKE[0] - REST[0]) * k, REST[1] + (STRIKE[1] - REST[1]) * k + Math.sin(now / 400 + l * 2) * 0.05]
   const side = l ? 1 : -1, toward = Math.max(0, Math.min(1, rel[1] / 1.2)) // the lower the hand, the more it drifts over its half of the drum
   return [sh[0] + side * (rel[0] * 13 + toward * 2) * u, sh[1] + rel[1] * 13 * u]
 }
@@ -593,7 +590,7 @@ function drawDrummer(now, { hx, hy }) {
   ctx.restore()
 }
 function drawStage(now, elapsed) {
-  tilt += ((poseLive(now) ? poseTilt : Math.sin(elapsed / (60000 / song.bpm) * Math.PI) * 0.025) - tilt) * 0.2
+  tilt += (Math.sin(elapsed / (60000 / song.bpm) * Math.PI) * 0.025 - tilt) * 0.2 // gentle sway to the beat
   const b = body(now, elapsed), arms = [0, 1].map((l) => arm(l, now, b.sh))
   drawColumn(0); drawColumn(1)
   drawDrummer(now, b)
