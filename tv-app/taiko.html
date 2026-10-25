@@ -50,13 +50,20 @@ function notesFromBars(bpm, bars) {
   }
   return { notes, totalMs: step * stepMs }
 }
-function buildSong(name, bpm, bars, theme) { const { notes, totalMs } = notesFromBars(bpm, bars); return { name, bpm, notes, totalMs, theme } }
+function buildSong(name, bpm, bars, theme, music) { const { notes, totalMs } = notesFromBars(bpm, bars); return { name, bpm, notes, totalMs, theme, music } }
+// music = the backing track (see scheduleMusic): root = MIDI note of the key, prog = one chord root per bar (semitones
+// above root, cycling), melody = bars of 8 eighth-note chars cycling, digits index PENTA ('.' = rest).
 const SONGS = [ // bg = festival sky, top to horizon
-  buildSong('Sunshine Beat', 78, Array(8).fill('L...R...'), { bg: ['#ffd27a', '#ff8a5c'] }),
-  buildSong('Bouncy Bus', 96, altBars('L.R.L.R.', 'L.RBL.R.', 6), { bg: ['#8fd3ff', '#3f7fd6'] }),
-  buildSong('Jungle Groove', 112, altBars('L.R.L.RB', 'L.RL.R.B', 8), { bg: ['#2f7d5b', '#103a2a'] }),
-  buildSong('Rocket Rhythm', 130, altBars('LRLRLRLR', 'LRBLRB..', 10), { bg: ['#3a2370', '#0b0722'] }),
+  buildSong('Sunshine Beat', 78, Array(8).fill('L...R...'), { bg: ['#ffd27a', '#ff8a5c'] },
+    { root: 60, prog: [0, 7, 9, 5], melody: ['2.3.4...', '3.2.1...', '0.1.2.1.', '0.......'] }),
+  buildSong('Bouncy Bus', 96, altBars('L.R.L.R.', 'L.RBL.R.', 6), { bg: ['#8fd3ff', '#3f7fd6'] },
+    { root: 65, prog: [0, 5, 7, 0], melody: ['0.2.4.2.', '3.3.2...', '1.2.3.4.', '2.1.0...'] }),
+  buildSong('Jungle Groove', 112, altBars('L.R.L.RB', 'L.RL.R.B', 8), { bg: ['#2f7d5b', '#103a2a'] },
+    { root: 57, prog: [9, 5, 0, 7], melody: ['4.4.5.4.', '2...1.0.', '4.5.6.5.', '4.2.1...'] }),
+  buildSong('Rocket Rhythm', 130, altBars('LRLRLRLR', 'LRBLRB..', 10), { bg: ['#3a2370', '#0b0722'] },
+    { root: 62, prog: [0, 0, 5, 7], melody: ['0.2.4.5.', '6.5.4.2.', '0.2.4.5.', '7.6.4...'] }),
 ]
+const PENTA = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21] // major pentatonic over two octaves - festival-sounding, never clashes
 const params = new URLSearchParams(location.search)
 let score = parseInt(params.get('score')) || 0
 
@@ -85,13 +92,13 @@ const drumPulse = [0, 0]
 const pulse = (l, amt) => { drumPulse[l] = Math.max(drumPulse[l], amt) }
 function startBuiltinSong(idx) {
   mode = 'builtin'; songIdx = Math.max(0, Math.min(SONGS.length - 1, idx)); song = SONGS[songIdx]
-  combo = 0; bestCombo = 0; phase = 'countdown'; t0 = performance.now() + COUNTDOWN_MS
+  combo = 0; bestCombo = 0; phase = 'countdown'; t0 = performance.now() + COUNTDOWN_MS; musicStep = -8
 }
 
-// ---- Audio: everything synthesised, no files (see tv-app/index.html's sfx for the same convention). The
-// backing beat (drumHit) always plays on schedule in builtin mode; a correct swing always layers a bright chime
-// on top, in both modes (a real Spotify track supplies its own beat, so drumHit is skipped there - see draw()). ----
-let actx, muted = false
+// ---- Audio: everything synthesised, no files (see tv-app/index.html's sfx for the same convention). Two parts:
+// the backing track (scheduleMusic, builtin songs only - a Spotify track is its own music) and the DON of the
+// taiko itself, which plays on every swing, hit or miss, because a drum always sounds when you hit it. ----
+let actx, muted = false, noiseBuf = null, musicBus = null, master = null
 const audioOn = () => actx && actx.state === 'running' && !muted
 function tone(f, t0 = 0, dur = 0.3, vol = 0.2, type = 'triangle') {
   if (!audioOn()) return
@@ -100,17 +107,72 @@ function tone(f, t0 = 0, dur = 0.3, vol = 0.2, type = 'triangle') {
   g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur)
   o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur)
 }
-function drumHit(lane) {
+// Everything except the little UI chimes goes through one limiter, so a DON landing on a kick never distorts.
+const out = () => master ||= (() => { const c = actx.createDynamicsCompressor(); c.threshold.value = -10; c.ratio.value = 12; c.attack.value = 0.002; const g = actx.createGain(); g.gain.value = 0.7; c.connect(g).connect(actx.destination); return c })()
+const midiHz = (m) => 440 * 2 ** ((m - 69) / 12)
+function env(t, vol, attack, dur, dest) { // gain node with a quick attack and exponential decay, connected to dest
+  const g = actx.createGain()
+  g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + attack); g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+  g.connect(dest); return g
+}
+function osc(type, f, t, dur, out) { const o = actx.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, t); o.connect(out); o.start(t); o.stop(t + dur + 0.05); return o }
+function noise(t, dur, filterType, freq, out) {
+  noiseBuf ||= (() => { const b = actx.createBuffer(1, actx.sampleRate, actx.sampleRate), d = b.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; return b })()
+  const s = actx.createBufferSource(), f = actx.createBiquadFilter()
+  s.buffer = noiseBuf; f.type = filterType; f.frequency.value = freq
+  s.connect(f).connect(out); s.start(t); s.stop(t + dur + 0.05)
+}
+
+// DON: a big low drum - a deep body whose pitch drops as the skin settles, a second partial for the boom, and a
+// short filtered noise slap for the stick hitting the hide. The right half is tuned a touch higher than the left
+// so the two hands sound different, like hitting different spots on a real taiko.
+function taikoDon(lane) {
   if (!audioOn()) return
-  const t = actx.currentTime, f = lane === 0 ? 150 : 440
-  const o = actx.createOscillator(), g = actx.createGain()
-  o.type = lane === 0 ? 'sine' : 'triangle'
-  o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * 0.55, t + 0.14)
-  g.gain.setValueAtTime(0.28, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16)
-  o.connect(g).connect(actx.destination); o.start(t); o.stop(t + 0.16)
+  const t = actx.currentTime, f = lane ? 118 : 100
+  osc('sine', f, t, 0.7, env(t, 0.75, 0.004, 0.7, out())).frequency.exponentialRampToValueAtTime(f * 0.52, t + 0.35)
+  osc('sine', f * 2.3, t, 0.25, env(t, 0.25, 0.003, 0.25, out())).frequency.exponentialRampToValueAtTime(f * 1.4, t + 0.2)
+  noise(t, 0.08, 'lowpass', 900, env(t, 0.5, 0.002, 0.08, out()))
+}
+
+// Backing-track instruments, all scheduled ahead at an exact audio time t into musicBus (kept under the DON).
+const kick = (t) => osc('sine', 130, t, 0.3, env(t, 0.8, 0.002, 0.3, musicBus)).frequency.exponentialRampToValueAtTime(42, t + 0.14)
+const clap = (t) => { noise(t, 0.14, 'bandpass', 1500, env(t, 0.45, 0.002, 0.14, musicBus)); noise(t + 0.012, 0.1, 'bandpass', 2200, env(t + 0.012, 0.25, 0.002, 0.1, musicBus)) }
+const hat = (t, v = 0.12) => noise(t, 0.05, 'highpass', 7000, env(t, v, 0.001, 0.05, musicBus))
+const stick = (t) => osc('square', 1800, t, 0.05, env(t, 0.25, 0.001, 0.05, musicBus)) // count-in "kachi" clicks
+const bass = (t, m, dur) => osc('triangle', midiHz(m), t, dur, env(t, 0.45, 0.01, dur, musicBus))
+function flute(t, m, dur) { // shinobue-ish: a sine with a breathy attack and a little vibrato
+  const out = env(t, 0.22, 0.03, dur, musicBus), o = osc('sine', midiHz(m), t, dur, out)
+  const lfo = actx.createOscillator(), depth = actx.createGain(); lfo.frequency.value = 5.5; depth.gain.value = midiHz(m) * 0.012
+  lfo.connect(depth).connect(o.frequency); lfo.start(t); lfo.stop(t + dur + 0.05)
+  noise(t, 0.05, 'bandpass', midiHz(m) * 2, env(t, 0.05, 0.005, 0.05, musicBus))
+}
+function chord(t, m, dur) { for (const iv of [0, 4, 7]) osc('triangle', midiHz(m + iv), t, dur, env(t, 0.06, 0.02, dur, musicBus)) }
+
+// Lookahead scheduler: each frame, schedule every eighth-note step due in the next 150ms at its exact audio time,
+// so the beat stays rock steady even if a frame is late. Steps count from the song start (t0); steps -8..-1 are
+// a 4-beat count-in of stick clicks during the countdown. Kick on every beat is the clear pulse to drum along to.
+let musicStep = -8
+function scheduleMusic(now) {
+  const stepMs = 60000 / song.bpm / 2, m = song.music, lastStep = Math.round(song.totalMs / stepMs)
+  while (musicStep <= lastStep && t0 + musicStep * stepMs < now + 150) {
+    const s = musicStep++, at = t0 + s * stepMs
+    if (at < now - 30 || !audioOn()) continue // too late to play cleanly (tab was hidden, audio not unlocked yet)
+    musicBus ||= (() => { const g = actx.createGain(); g.gain.value = 0.55; g.connect(out()); return g })()
+    const t = actx.currentTime + (at - now) / 1000
+    if (s < 0) { if (s % 2 === 0) stick(t); continue }
+    if (s === lastStep) { kick(t); chord(t, m.root + m.prog[0], 1.2); flute(t, m.root + 12, 1.2); continue } // final hit
+    const bar = Math.floor(s / 8), pos = s % 8, ch = m.root + m.prog[bar % m.prog.length], beatSec = stepMs * 2 / 1000
+    if (pos % 2 === 0) kick(t)
+    if (pos === 2 || pos === 6) clap(t)
+    hat(t, pos % 2 ? 0.07 : 0.12)
+    if (pos % 2 === 0) bass(t, ch - 24 + (pos === 4 ? 7 : 0), beatSec * 0.9)
+    if (pos === 0) chord(t, ch, beatSec * 3.5)
+    const note = m.melody[bar % m.melody.length][pos]
+    if (note !== '.') flute(t, m.root + 12 + PENTA[+note], beatSec * 0.9)
+  }
 }
 const CHIME_NOTES = [659.25, 783.99, 880, 1046.5, 1318.5]
-const hitChime = (c) => tone(CHIME_NOTES[Math.min(c, CHIME_NOTES.length - 1)], 0, 0.28, 0.18, 'sine')
+const hitChime = (c) => tone(CHIME_NOTES[Math.min(c, CHIME_NOTES.length - 1)], 0, 0.22, 0.07, 'sine')
 const songChime = () => [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, i * 0.11, 0.4, 0.22))
 const unlock = () => { actx ||= new AudioContext(); actx.resume() }
 
@@ -139,6 +201,8 @@ function drawConfetti() {
 // ---- Hitting a note: the nearest not-yet-resolved note in that lane, within HIT_WINDOW_MS either side of now.
 // Missing entirely is silent and score-neutral (no fail state) - the beat played on regardless. ----
 function strike(lane) {
+  taikoDon(lane); pulse(lane, 1); swingAt[lane] = performance.now()
+  popText('DON!', drumX[lane], headY + 4 * u, LANE_COLOR[lane])
   if (phase !== 'playing') return
   const elapsed = performance.now() - t0
   let best = null, bestDist = Infinity
@@ -147,7 +211,6 @@ function strike(lane) {
     const d = Math.abs(elapsed - n.t)
     if (d <= HIT_WINDOW_MS && d < bestDist) { best = n; bestDist = d }
   }
-  pulse(lane, 1); swingAt[lane] = performance.now()
   if (!best) return
   best.hit = true; combo++; bestCombo = Math.max(bestCombo, combo); score += 10 + Math.min(combo, 10)
   hitChime(Math.min(combo, 4)); happyUntil = performance.now() + 350
@@ -625,8 +688,9 @@ function draw() {
   ctx.clearRect(0, 0, W, H)
   drawBackground(now)
   if (phase !== 'celebrate' && phase !== 'idle') {
+    if (mode === 'builtin') scheduleMusic(now)
     for (const n of song.notes) {
-      if (!n.played && elapsed >= n.t) { if (mode === 'builtin') drumHit(n.lane); n.played = true; pulse(n.lane, 0.5) }
+      if (!n.played && elapsed >= n.t) { n.played = true; pulse(n.lane, 0.35) } // the drum glows on each note as a visual cue
       if (!n.hit && !n.missed && elapsed > n.t + HIT_WINDOW_MS) n.missed = true
     }
     drumPulse[0] = Math.max(0, drumPulse[0] - dt * 2.2); drumPulse[1] = Math.max(0, drumPulse[1] - dt * 2.2)
